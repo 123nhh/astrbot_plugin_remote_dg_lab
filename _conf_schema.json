@@ -1,0 +1,77 @@
+{
+    "remote_server": {
+        "description": "是否连接到远程 WebSocket 服务端（关闭则使用本地搭建）",
+        "type": "bool",
+        "default": false
+    },
+    "remote_server_uri": {
+        "description": "远程服务端 URI（启用远程服务端时必填），例如 ws://my-server.net:8080",
+        "type": "string",
+        "default": ""
+    },
+    "local_server_host": {
+        "description": "本地搭建的服务端监听地址",
+        "type": "string",
+        "default": "0.0.0.0"
+    },
+    "local_server_port": {
+        "description": "本地搭建的服务端监听端口",
+        "type": "int",
+        "default": 4567
+    },
+    "local_server_publish_uri": {
+        "description": "生成二维码时使用的本地服务端 URI（需要郊狼用户能够连接，即本机的公网地址）。普通连接 ws://，SSL 加密连接 wss://",
+        "type": "string",
+        "default": "ws://127.0.0.1:4567"
+    },
+    "local_server_secure": {
+        "description": "是否启用 SSL 连接（本地服务端模式下）",
+        "type": "bool",
+        "default": false
+    },
+    "local_server_ssl_cert": {
+        "description": "SSL 证书文件路径（启用 SSL 时必填）",
+        "type": "string",
+        "default": ""
+    },
+    "local_server_ssl_key": {
+        "description": "SSL 私钥文件路径",
+        "type": "string",
+        "default": ""
+    },
+    "local_server_ssl_password": {
+        "description": "SSL 私钥密码",
+        "type": "string",
+        "default": ""
+    },
+    "bind_timeout": {
+        "description": "绑定超时时间（秒）",
+        "type": "float",
+        "default": 90
+    },
+    "register_timeout": {
+        "description": "终端注册（获取 clientId）超时时间（秒）",
+        "type": "float",
+        "default": 30
+    },
+    "duration_per_post": {
+        "description": "每次发送的波形最大持续时长（秒）",
+        "type": "float",
+        "default": 5.0
+    },
+    "post_interval": {
+        "description": "波形发送间隔（秒）",
+        "type": "float",
+        "default": 1.0
+    },
+    "sleep_after_clear": {
+        "description": "清空波形队列后的等待时间（秒）",
+        "type": "float",
+        "default": 0.5
+    },
+    "auto_accept_friend": {
+        "description": "是否自动通过好友请求（仅 aiocqhttp 平台）",
+        "type": "bool",
+        "default": true
+    }
+}

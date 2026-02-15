@@ -1,0 +1,6 @@
+name: astrbot_plugin_remote_dg_lab # 插件唯一识别名
+display_name: DG-Lab-Play 郊狼玩法 # 用于展示的名字
+desc: 在群里和大家一起玩郊狼吧！支持多个郊狼玩家同时连接，通过 DG-Lab App Socket 协议控制设备。移植自 nonebot-plugin-dg-lab-play。
+version: v1.0.0 # 插件版本号
+author: Ljzd-PRO # 原作者
+repo: https://github.com/Ljzd-PRO/nonebot-plugin-dg-lab-play # 原项目地址
