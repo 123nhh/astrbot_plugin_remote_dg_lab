@@ -1218,21 +1218,22 @@ class DGLabPlayPlugin(Star):
         else:
             hint = "⬇️ 大了"
 
-        # 惩罚强度按偏差算，但不告诉玩家具体偏差
-        pct = min(diff, 100)
+        # 固定惩罚，避免通过体感推断偏差
+        pct = 40
+        duration = 8
 
         if remaining > 0:
             result_text = f"{hint}！剩余 {remaining} 次机会"
         else:
             result_text = f"{hint}！机会已用完，答案是 {answer}，最终惩罚！"
             self._guess_games.pop(user_id, None)
-            pct = 80  # 用完机会的最终惩罚
+            pct = 80
+            duration = 15
 
         yield event.plain_result(result_text)
 
         # 执行惩罚
         if target_client and not target_client.is_destroyed:
-            duration = max(5, pct // 10 + 3)
             self._start_gameplay_task(
                 user_id,
                 self._dice_punishment_task(target_client, user_id, game.get("umo", event.unified_msg_origin), (pct, pct), duration)
