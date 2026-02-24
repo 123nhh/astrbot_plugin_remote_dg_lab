@@ -11,7 +11,11 @@ from pathlib import Path
 
 from pydglab_ws import PulseOperation
 
-__all__ = ["CustomPulseData", "CustomPulseDataJSONEncoder", "custom_pulse_data", "load_custom_pulse_data"]
+__all__ = [
+    "CustomPulseData", "CustomPulseDataJSONEncoder",
+    "custom_pulse_data", "load_custom_pulse_data",
+    "parse_dungeonlab_pulse", "load_pulse_files_from_dir",
+]
 
 
 class CustomPulseDataJSONEncoder(json.JSONEncoder):
@@ -209,3 +213,85 @@ def load_custom_pulse_data(data_dir: Path, logger):
             logger.info(f"成功读取自定义波形文件 - {custom_pulse_file}")
         except Exception as e:
             logger.error(f"读取自定义波形文件失败: {e}，使用内置波形")
+
+
+def parse_dungeonlab_pulse(content: str) -> List[PulseOperation]:
+    """
+    解析 DG-Lab App 导出的 .pulse 文件，返回 PulseOperation 列表。
+
+    .pulse 文件格式以 "Dungeonlab+pulse:" 开头，包含多个 +section+ 分隔的段落，
+    每个段落中 '/' 后面是强度点列表（格式 "100.00-1"，取第一个数字作为强度 0-100）。
+    每 4 个强度点组合为一个 PulseOperation，使用固定频率 80，最多返回 80 组。
+    """
+    content = content.strip()
+    if not content.startswith("Dungeonlab+pulse"):
+        return []
+
+    try:
+        _, rest = content.split(":", 1)
+    except ValueError:
+        return []
+
+    segments = rest.split("+section+")
+    strengths_all: List[float] = []
+    for seg in segments:
+        if "/" not in seg:
+            continue
+        _, data = seg.split("/", 1)
+        tokens = [t for t in data.split(",") if t.strip()]
+        for token in tokens:
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                val_str = token.split("-", 1)[0]
+                v = float(val_str)
+                strengths_all.append(v)
+            except ValueError:
+                continue
+
+    pulses: List[PulseOperation] = []
+    if not strengths_all:
+        return pulses
+
+    i = 0
+    while i < len(strengths_all):
+        group = strengths_all[i: i + 4]
+        if len(group) < 4:
+            group += [group[-1]] * (4 - len(group))
+        strengths = tuple(max(0, min(100, int(round(v)))) for v in group)
+        freqs = (80, 80, 80, 80)
+        pulses.append((freqs, strengths))
+        i += 4
+
+    return pulses[:80]
+
+
+def load_pulse_files_from_dir(pulses_dir: Path, logger) -> int:
+    """
+    从 pulses 子目录加载所有 .pulse 文件，将其解析后增量合并进 custom_pulse_data。
+    返回成功加载的文件数量。（波形为空的文件跳过不添加）
+    """
+    if not pulses_dir.is_dir():
+        pulses_dir.mkdir(parents=True, exist_ok=True)
+        return 0
+
+    loaded = 0
+    for file in pulses_dir.glob("*.pulse"):
+        try:
+            text = file.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            logger.warning(f"读取 .pulse 文件失败: {file.name} - {e}")
+            continue
+
+        pulses = parse_dungeonlab_pulse(text)
+        if not pulses:
+            logger.warning(f"跳过空波形文件: {file.name}")
+            continue
+
+        preset_name = file.stem  # 文件名不含扩展名作为波形名
+        custom_pulse_data.data[preset_name] = list(pulses)
+        loaded += 1
+        logger.info(f"已加载 .pulse 波形: {preset_name} ({len(pulses)} 组)")
+
+    return loaded

@@ -23,8 +23,17 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
 from .client_manager import ClientManager, DGLabPlayConfig
-from .model import custom_pulse_data, load_custom_pulse_data
+from .model import custom_pulse_data, load_custom_pulse_data, parse_dungeonlab_pulse, load_pulse_files_from_dir
 
+
+MAX_STRENGTH_PCT = 90.0
+"""除一键制裁外，所有玩法的最大强度上限（百分比）"""
+
+SHIELD_TRIGGER_PROB = 0.45
+"""护盾随机触发概率"""
+
+SHIELD_RECHARGE_SECS = 2700
+"""护盾充能间隔（秒），45 分钟"""
 
 # ==================== 回复文本常量 ====================
 class ReplyText:
@@ -66,17 +75,16 @@ USAGE_TEXT = """\
 🎚️查看当前通道强度：/当前强度 @用户
 🎲随机通道强度：/随机强度 @用户
 
-🏷️列出可用波形：/可用波形
-⤴️添加波形到循环：/增加波形 @用户 <波形名称>
-🔄️重设为某波形：/重置波形 @用户 <波形名称>
-📈显示当前波形：/当前波形 @用户
-🎲重设为随机波形：/随机波形 @用户
+� 波形由系统自动随机切换（10s 一次），无需手动设置
+🏷️查看可用波形：/可用波形
+📤上传自定义波形：将 *.pulse 文件发送到群文件，自动解析添加
+   或发送 /导入波形 并粘贴 Dungeonlab+pulse:... 文本
 
-🎯 进阶玩法：
+🎯 进阶玩法（最高强度 90%）：
 🎲掷骰子惩罚：/郊狼骰子 @用户
 🌪️随机风暴：/随机风暴 @用户 [时长秒] [次数]
 📈渐强惩罚：/渐强惩罚 @用户 [时长秒] [最终百分比]
-💀一键制裁：/一键制裁 @用户 [时长秒]
+💀一键制裁：/一键制裁 @用户 [时长秒]（满功率，不受 90% 限制）
   └ 每人每小时最多发起 3 次，被控者免审 1 次/h，超出需批准
 ✅批准制裁请求：/批准制裁
 🎰郊狼轮盘：/郊狼轮盘
@@ -86,10 +94,9 @@ USAGE_TEXT = """\
 ⛔停止玩法任务：/停止任务 @用户
 
 🛡️ 反弹护盾机制：
-每位玩家绑定后自动获得反弹护盾（每小时自动补充 1 层）
-当受到惩罚类指令时，护盾自动触发，惩罚反弹给攻击者
-攻击者无法提前知道对方是否有护盾，形成心理博弈
-私聊机器人发送 /护盾状态 查看自己的护盾
+每位玩家绑定后自动获得反弹护盾（每 45 分钟自动补充 1 层）
+加强度 ≥30% 或受其他惩罚时，护盾有概率随机触发，反弹给攻击者
+
 
 🔗项目链接：https://github.com/123nhh/astrbot_plugin_remote_dg_lab
 """
@@ -181,8 +188,8 @@ def _parse_numbers_from_text(event: AstrMessageEvent) -> list:
 
 
 @register("astrbot_plugin_remote_dg_lab", "Ljzd-PRO & AstrBot Porter",
-          "DG-Lab-Play 郊狼玩法 - 在群里和大家一起玩郊狼吧！", "1.0.0",
-          "https://github.com/Ljzd-PRO/nonebot-plugin-dg-lab-play")
+          "DG-Lab-Play 郊狼玩法 - 在群里和大家一起玩郊狼吧！", "1.2.0",
+          "https://github.com/123nhh/astrbot_plugin_remote_dg_lab")
 class DGLabPlayPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -200,6 +207,10 @@ class DGLabPlayPlugin(Star):
         self._shields: Dict[str, dict] = {}
         # 猜数字游戏状态: victim_id -> {"answer": int, "attacker": str, "remaining": int, "umo": str}
         self._guess_games: Dict[str, dict] = {}
+        # 波形背景轮播任务: user_id -> asyncio.Task
+        self._wave_rotation_tasks: Dict[str, asyncio.Task] = {}
+        # 存放 .pulse 文件的目录
+        self._pulses_dir: Optional[Path] = None
 
     async def initialize(self):
         """插件初始化：加载配置、波形数据、启动 WS 服务端"""
@@ -209,7 +220,13 @@ class DGLabPlayPlugin(Star):
             self._data_dir = Path("data/plugin_data/astrbot_plugin_remote_dg_lab")
             self._data_dir.mkdir(parents=True, exist_ok=True)
 
+            self._pulses_dir = self._data_dir / "pulses"
+            self._pulses_dir.mkdir(parents=True, exist_ok=True)
+
             load_custom_pulse_data(self._data_dir, logger)
+            n = load_pulse_files_from_dir(self._pulses_dir, logger)
+            if n:
+                logger.info(f"共额外加载 {n} 个 .pulse 波形文件")
 
             self.client_manager = ClientManager(self.dg_config, logger)
             self.client_manager.serve()
@@ -272,12 +289,12 @@ class DGLabPlayPlugin(Star):
             chain.message(
                 ReplyText.successfully_bind + "\n\n"
                 "🛡️ 你已获得一层『反弹护盾』！\n"
-                "• 当你被惩罚类指令攻击时，护盾会自动触发，将惩罚反弹给攻击者\n"
-                "• 每小时自动补充 1 层，最多拥有 1 层\n"
-                "• 攻击者无法提前知道你是否有护盾，尽情享受心理博弈吧！\n"
+                "• 当你被 ≥30% 强度攻击或受到惩罚时，护盾有概率随机触发，将惩罚反弹给攻击者\n"
+                "• 每 45 分钟自动补充 1 层，最多拥有 1 层\n"
                 "• 私聊发送 /护盾状态 可查看护盾情况"
             )
             self._grant_shield(play_client.user_id)
+            self._start_wave_rotation(play_client.user_id, play_client)
         else:
             chain.message(ReplyText.bind_timeout)
 
@@ -305,6 +322,7 @@ class DGLabPlayPlugin(Star):
         user_id = event.get_sender_id()
         play_client = self.client_manager.user_id_to_client.get(user_id)
         if play_client:
+            self._stop_wave_rotation(user_id)
             await play_client.destroy()
             yield event.plain_result(ReplyText.game_exited)
         else:
@@ -318,18 +336,17 @@ class DGLabPlayPlugin(Star):
         target_user_id: str,
         percentage_value: Optional[float]
     ):
-        """通用强度控制逻辑"""
+        """通用强度控制逻辑（上限 MAX_STRENGTH_PCT）"""
         if percentage_value is None or not (0 < percentage_value <= 100):
             yield event.plain_result(ReplyText.invalid_strength_param)
             return
 
+        # 非制裁类强度控制限制上限
+        percentage_value = min(percentage_value, MAX_STRENGTH_PCT)
+
         play_client = self.client_manager.user_id_to_client.get(target_user_id)
         if not play_client:
             yield event.plain_result(ReplyText.invalid_target)
-            return
-
-        if not play_client.pulse_data:
-            yield event.plain_result(ReplyText.please_set_pulse_first)
             return
 
         if not play_client.last_strength:
@@ -361,6 +378,23 @@ class DGLabPlayPlugin(Star):
             yield event.plain_result(ReplyText.please_at_target)
             return
         percentage = _parse_percentage_from_text(event)
+
+        # 护盾检查：加大强度 ≥30% 时可触发反弹
+        if percentage is not None and percentage >= 30:
+            sender_id = event.get_sender_id()
+            play_client = self.client_manager.user_id_to_client.get(target)
+            sender_client = self.client_manager.user_id_to_client.get(sender_id)
+            reflected = await self._try_shield_reflect(
+                sender_id, target, event.unified_msg_origin,
+                play_client, sender_client,
+                lambda sc, sid: self._dice_punishment_task(
+                    sc, sid, event.unified_msg_origin,
+                    (int(percentage), int(min(percentage + 20, MAX_STRENGTH_PCT))), 15
+                )
+            )
+            if reflected:
+                return
+
         async for result in self._strength_control(event, StrengthOperationType.INCREASE, target, percentage):
             yield result
 
@@ -413,121 +447,13 @@ class DGLabPlayPlugin(Star):
         else:
             yield event.plain_result(ReplyText.failed_to_fetch_strength_info)
 
-    # ==================== 波形控制指令 ====================
-
-    @filter.command("增加波形")
-    async def append_pulse(self, event: AstrMessageEvent):
-        """添加波形到循环：/增加波形 @用户 <波形名称>"""
-        target = _get_at_target(event)
-        if not target:
-            yield event.plain_result(ReplyText.please_at_target)
-            return
-
-        pulse_name = _parse_pulse_name_from_text(event)
-        if not pulse_name:
-            yield event.plain_result(ReplyText.invalid_pulse_param)
-            return
-
-        pulse_data = custom_pulse_data.get(pulse_name)
-        if not pulse_data:
-            yield event.plain_result(ReplyText.invalid_pulse_param)
-            return
-
-        play_client = self.client_manager.user_id_to_client.get(target)
-        if not play_client:
-            yield event.plain_result(ReplyText.invalid_target)
-            return
-
-        play_client.setup_pulse_job(
-            play_client.pulse_names + [pulse_name],
-            play_client.pulse_data + pulse_data,
-            Channel.A, Channel.B
-        )
-        yield event.plain_result(
-            ReplyText.successfully_set_pulse.format("-".join(play_client.pulse_names))
-        )
-
-    @filter.command("重置波形")
-    async def reset_pulse(self, event: AstrMessageEvent):
-        """重设为某波形：/重置波形 @用户 <波形名称>"""
-        target = _get_at_target(event)
-        if not target:
-            yield event.plain_result(ReplyText.please_at_target)
-            return
-
-        pulse_name = _parse_pulse_name_from_text(event)
-        if not pulse_name:
-            yield event.plain_result(ReplyText.invalid_pulse_param)
-            return
-
-        pulse_data = custom_pulse_data.get(pulse_name)
-        if not pulse_data:
-            yield event.plain_result(ReplyText.invalid_pulse_param)
-            return
-
-        play_client = self.client_manager.user_id_to_client.get(target)
-        if not play_client:
-            yield event.plain_result(ReplyText.invalid_target)
-            return
-
-        play_client.setup_pulse_job([pulse_name], pulse_data, Channel.A, Channel.B)
-        yield event.plain_result(
-            ReplyText.successfully_set_pulse.format("-".join(play_client.pulse_names))
-        )
-
-    @filter.command("随机波形")
-    async def random_pulse(self, event: AstrMessageEvent):
-        """重设为随机波形：/随机波形 @用户"""
-        target = _get_at_target(event)
-        if not target:
-            yield event.plain_result(ReplyText.please_at_target)
-            return
-
-        available_names = custom_pulse_data.keys
-        if not available_names:
-            yield event.plain_result(ReplyText.no_available_pulse)
-            return
-
-        pulse_name = random.choice(available_names)
-        pulse_data = custom_pulse_data.get(pulse_name)
-
-        play_client = self.client_manager.user_id_to_client.get(target)
-        if not play_client:
-            yield event.plain_result(ReplyText.invalid_target)
-            return
-
-        play_client.setup_pulse_job([pulse_name], pulse_data, Channel.A, Channel.B)
-        yield event.plain_result(
-            ReplyText.successfully_set_pulse.format("-".join(play_client.pulse_names))
-        )
-
-    # ==================== 波形查询指令 ====================
-
-    @filter.command("当前波形")
-    async def current_pulse(self, event: AstrMessageEvent):
-        """显示当前波形：/当前波形 @用户"""
-        target = _get_at_target(event)
-        if not target:
-            yield event.plain_result(ReplyText.please_at_target)
-            return
-
-        play_client = self.client_manager.user_id_to_client.get(target)
-        if not play_client:
-            yield event.plain_result(ReplyText.invalid_target)
-            return
-
-        if play_client.pulse_names:
-            yield event.plain_result(
-                ReplyText.current_pulse.format("-".join(play_client.pulse_names))
-            )
-        else:
-            yield event.plain_result(ReplyText.pulses_empty)
+    # ==================== 波形信息指令 ====================
 
     @filter.command("可用波形")
     async def show_pulses(self, event: AstrMessageEvent):
         """列出所有可用波形名称"""
         if custom_pulse_data:
-            yield event.plain_result("、".join(custom_pulse_data.keys))
+            yield event.plain_result("🎵 当前可用波形（系统自动轮播，无需手动切换）：\n" + "、".join(custom_pulse_data.keys))
         else:
             yield event.plain_result(ReplyText.no_available_pulse)
 
@@ -540,25 +466,56 @@ class DGLabPlayPlugin(Star):
 
     # ==================== 内部辅助方法 ====================
 
-    async def _set_strength_pct(self, play_client, percentage: float) -> bool:
-        """直接设置玩家强度为指定百分比"""
+    async def _set_strength_pct(self, play_client, percentage: float, bypass_cap: bool = False) -> bool:
+        """直接设置玩家强度为指定百分比（默认上限 MAX_STRENGTH_PCT）"""
         if not play_client.last_strength or play_client.is_destroyed:
             return False
-        a_val = round(play_client.last_strength.a_limit * (percentage / 100))
-        b_val = round(play_client.last_strength.b_limit * (percentage / 100))
+        cap = 100.0 if bypass_cap else MAX_STRENGTH_PCT
+        pct = min(percentage, cap)
+        a_val = round(play_client.last_strength.a_limit * (pct / 100))
+        b_val = round(play_client.last_strength.b_limit * (pct / 100))
         await play_client.client.set_strength(Channel.A, StrengthOperationType.SET_TO, a_val)
         await play_client.client.set_strength(Channel.B, StrengthOperationType.SET_TO, b_val)
         return True
 
-    async def _set_random_pulse(self, play_client) -> Optional[str]:
-        """为玩家设置随机波形，返回波形名称"""
-        names = custom_pulse_data.keys
-        if not names:
-            return None
-        name = random.choice(names)
-        data = custom_pulse_data.get(name)
-        play_client.setup_pulse_job([name], data, Channel.A, Channel.B)
-        return name
+    # ==================== 波形背景轮播 ====================
+
+    def _start_wave_rotation(self, user_id: str, play_client):
+        """启动用户的背景波形轮播任务（绑定时调用）"""
+        self._stop_wave_rotation(user_id)
+        task = asyncio.create_task(self._wave_rotation_task(play_client, user_id))
+        self._wave_rotation_tasks[user_id] = task
+
+    def _stop_wave_rotation(self, user_id: str):
+        """停止用户的背景波形轮播任务"""
+        task = self._wave_rotation_tasks.pop(user_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    async def _wave_rotation_task(self, play_client, user_id: str):
+        """
+        背景波形轮播：将所有可用波形随机打乱后依次切换，每 10s 一次。
+        走完整个列表后重新随机，不向群里发送任何通知。
+        惩罚类指令不会修改波形，只控制强度。
+        """
+        try:
+            while not play_client.is_destroyed:
+                available = list(custom_pulse_data.keys)
+                if not available:
+                    await asyncio.sleep(10)
+                    continue
+                random.shuffle(available)
+                for name in available:
+                    if play_client.is_destroyed:
+                        return
+                    data = custom_pulse_data.get(name)
+                    if data:
+                        play_client.setup_pulse_job([name], data, Channel.A, Channel.B)
+                    await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"波形背景轮播任务异常 [{user_id}]: {e}")
 
     def _start_gameplay_task(self, user_id: str, coro) -> asyncio.Task:
         """启动玩法后台任务，自动取消该用户之前的活跃任务"""
@@ -570,22 +527,21 @@ class DGLabPlayPlugin(Star):
         return task
 
     def _get_shield(self, user_id: str) -> int:
-        """获取玩家当前护盾层数（自动补充）"""
+        """获取玩家当前护盾层数（自动补充，每 45 分钟补充 1 层）"""
         now = time.time()
         shield = self._shields.get(user_id)
         if not shield:
             return 0
-        # 每小时自动补充 1 层，最多 1 层
         elapsed = now - shield["last_recharge"]
-        if shield["charges"] < 1 and elapsed >= 3600:
+        if shield["charges"] < 1 and elapsed >= SHIELD_RECHARGE_SECS:
             shield["charges"] = 1
             shield["last_recharge"] = now
         return shield["charges"]
 
     def _consume_shield(self, user_id: str) -> bool:
-        """尝试消耗护盾，返回是否成功触发"""
+        """随机概率触发护盾（非必然），返回是否触发并扣除一层"""
         charges = self._get_shield(user_id)
-        if charges > 0:
+        if charges > 0 and random.random() < SHIELD_TRIGGER_PROB:
             self._shields[user_id]["charges"] = charges - 1
             return True
         return False
@@ -628,23 +584,13 @@ class DGLabPlayPlugin(Star):
 
     async def _dice_punishment_task(self, play_client, target_uid: str, umo: str,
                                      strength_range: tuple, duration: int):
-        """骰子惩罚后台任务"""
+        """骰子惩罚后台任务（静默执行，不再发中间消息）"""
         try:
-            pct = random.randint(strength_range[0], strength_range[1])
-            pulse_name = await self._set_random_pulse(play_client)
+            pct = min(random.randint(strength_range[0], strength_range[1]), MAX_STRENGTH_PCT)
             await self._set_strength_pct(play_client, pct)
-
-            chain = MessageChain()
-            chain.message(f"⚡ 惩罚执行中！强度 {pct}%，波形【{pulse_name}】，持续 {duration} 秒")
-            await self.context.send_message(umo, chain)
-
             await asyncio.sleep(duration)
-
             if not play_client.is_destroyed:
                 await self._set_strength_pct(play_client, 0)
-                chain = MessageChain()
-                chain.message("✅ 骰子惩罚结束，强度已归零")
-                await self.context.send_message(umo, chain)
         except asyncio.CancelledError:
             if not play_client.is_destroyed:
                 try:
@@ -658,27 +604,46 @@ class DGLabPlayPlugin(Star):
 
     async def _storm_task(self, play_client, target_uid: str, umo: str,
                            duration: float, times: int):
-        """随机风暴后台任务：在指定时间内随机变化 N 次强度和波形"""
+        """
+        随机风暴后台任务。
+        - 若玩家当前强度为 0，则从小到大递增，逐步趋向 ±30% 的稳定区间。
+        - 最终以一条合并消息播报所有步骤。
+        - 强度上限 MAX_STRENGTH_PCT。
+        """
         interval = duration / max(times, 1)
+        step_logs = []
         try:
+            # 检测当前强度是否为 0，决定是否使用渐进模式
+            current_is_zero = (
+                play_client.last_strength is not None and
+                play_client.last_strength.a == 0 and
+                play_client.last_strength.b == 0
+            )
+
             for i in range(times):
                 if play_client.is_destroyed:
                     break
-                pct = random.randint(5, 100)
-                pulse_name = await self._set_random_pulse(play_client)
+
+                if current_is_zero:
+                    # 渐进模式：从 5% 开始，每步递增，收敛到 [15, 55] 区间
+                    progress = (i + 1) / times  # 0~1
+                    base = 5 + 50 * progress  # 5% → 55%
+                    noise = random.uniform(-15, 15)
+                    pct = min(max(base + noise, 5), MAX_STRENGTH_PCT)
+                else:
+                    pct = min(random.randint(5, 100), MAX_STRENGTH_PCT)
+
                 await self._set_strength_pct(play_client, pct)
-
-                chain = MessageChain()
-                chain.message(f"🌪️ 风暴 [{i + 1}/{times}]：强度 {pct}%，波形【{pulse_name}】")
-                await self.context.send_message(umo, chain)
-
+                step_logs.append(f"  [{i + 1}/{times}] 强度 {int(pct)}%")
                 await asyncio.sleep(interval)
 
             if not play_client.is_destroyed:
                 await self._set_strength_pct(play_client, 0)
-                chain = MessageChain()
-                chain.message("🌈 随机风暴结束！强度已归零")
-                await self.context.send_message(umo, chain)
+
+            summary = "🌪️ 随机风暴结束！\n" + "\n".join(step_logs) + "\n✅ 强度已归零"
+            chain = MessageChain()
+            chain.message(summary)
+            await self.context.send_message(umo, chain)
         except asyncio.CancelledError:
             if not play_client.is_destroyed:
                 try:
@@ -692,19 +657,11 @@ class DGLabPlayPlugin(Star):
 
     async def _gradual_task(self, play_client, target_uid: str, umo: str,
                              duration: float, final_pct: float):
-        """渐强惩罚后台任务：强度从 0 线性升至目标百分比"""
+        """渐强惩罚后台任务：强度从 0 线性升至目标百分比（上限 MAX_STRENGTH_PCT）"""
+        final_pct = min(final_pct, MAX_STRENGTH_PCT)
         steps = min(int(duration), 20)
         interval = duration / max(steps, 1)
         try:
-            pulse_name = await self._set_random_pulse(play_client)
-
-            chain = MessageChain()
-            chain.message(
-                f"📈 渐强惩罚开始！波形【{pulse_name}】\n"
-                f"将在 {int(duration)} 秒内从 0% 逐步升至 {int(final_pct)}%"
-            )
-            await self.context.send_message(umo, chain)
-
             for i in range(1, steps + 1):
                 if play_client.is_destroyed:
                     break
@@ -712,12 +669,11 @@ class DGLabPlayPlugin(Star):
                 await self._set_strength_pct(play_client, current_pct)
                 await asyncio.sleep(interval)
 
-            # 保持最终强度 3 秒后归零
             if not play_client.is_destroyed:
                 await asyncio.sleep(3)
                 await self._set_strength_pct(play_client, 0)
                 chain = MessageChain()
-                chain.message("📉 渐强惩罚结束！强度已归零")
+                chain.message(f"📉 渐强惩罚结束！已从 0% 升至 {int(final_pct)}%，强度已归零")
                 await self.context.send_message(umo, chain)
         except asyncio.CancelledError:
             if not play_client.is_destroyed:
@@ -732,33 +688,29 @@ class DGLabPlayPlugin(Star):
 
     async def _sanction_task(self, play_client, target_uid: str, umo: str,
                               duration: float):
-        """一键制裁后台任务：满功率输出指定时长"""
+        """一键制裁后台任务：满功率输出指定时长（绕过 90% 上限）"""
         try:
-            pulse_name = await self._set_random_pulse(play_client)
-            await self._set_strength_pct(play_client, 100)
+            await self._set_strength_pct(play_client, 100, bypass_cap=True)
 
             chain = MessageChain()
-            chain.message(f"💀 一键制裁执行中！满功率波形【{pulse_name}】，持续 {int(duration)} 秒！")
+            chain.message(f"💀 一键制裁执行中！满功率，持续 {int(duration)} 秒！")
             await self.context.send_message(umo, chain)
 
             await asyncio.sleep(duration)
 
             if not play_client.is_destroyed:
-                await self._set_strength_pct(play_client, 0)
+                await self._set_strength_pct(play_client, 0, bypass_cap=True)
                 chain = MessageChain()
                 chain.message("✅ 制裁结束，强度已归零")
                 await self.context.send_message(umo, chain)
         except asyncio.CancelledError:
             if not play_client.is_destroyed:
                 try:
-                    await self._set_strength_pct(play_client, 0)
+                    await self._set_strength_pct(play_client, 0, bypass_cap=True)
                 except Exception:
                     pass
         except Exception as e:
             logger.error(f"一键制裁任务异常: {e}")
-        finally:
-            self._active_tasks.pop(target_uid, None)
-
     # ==================== 进阶玩法指令 ====================
 
     @filter.command("郊狼骰子")
@@ -779,6 +731,11 @@ class DGLabPlayPlugin(Star):
 
         result_text = f"🎲 骰子转动中... {outcome['face']} = {roll}！\n"
         result_text += f"【{outcome['name']}】{outcome['desc']}"
+        if outcome["strength"]:
+            s_lo, s_hi = outcome["strength"]
+            s_lo = min(s_lo, int(MAX_STRENGTH_PCT))
+            s_hi = min(s_hi, int(MAX_STRENGTH_PCT))
+            result_text += f"\n⚡ 强度 {s_lo}~{s_hi}%，持续 {outcome['duration']} 秒"
 
         # 处理命运逆转：惩罚反弹给施法者
         actual_target = target
@@ -1009,9 +966,19 @@ class DGLabPlayPlugin(Star):
             return
 
         target_uid, play_client = random.choice(players)
-
-        pct = random.randint(20, 100)
+        pct = min(random.randint(20, 100), MAX_STRENGTH_PCT)
         duration = random.randint(10, 60)
+
+        # 护盾检查
+        sender_id = event.get_sender_id()
+        sender_client = self.client_manager.user_id_to_client.get(sender_id)
+        reflected = await self._try_shield_reflect(
+            sender_id, target_uid, event.unified_msg_origin,
+            play_client, sender_client,
+            lambda sc, sid: self._dice_punishment_task(sc, sid, event.unified_msg_origin, (pct, pct), duration)
+        )
+        if reflected:
+            return
 
         yield event.chain_result([
             Plain("🎰 郊狼轮盘转动中...\n🎯 命运选中了 "),
@@ -1021,10 +988,7 @@ class DGLabPlayPlugin(Star):
 
         self._start_gameplay_task(
             target_uid,
-            self._dice_punishment_task(
-                play_client, target_uid, event.unified_msg_origin,
-                (pct, pct), duration
-            )
+            self._dice_punishment_task(play_client, target_uid, event.unified_msg_origin, (pct, pct), duration)
         )
 
     @filter.command("停止任务")
@@ -1042,6 +1006,114 @@ class DGLabPlayPlugin(Star):
         else:
             yield event.plain_result("当前没有正在进行的玩法任务")
 
+    # ==================== .pulse 波形文件导入 ====================
+
+    @filter.command("导入波形")
+    async def import_pulse(self, event: AstrMessageEvent):
+        """
+        导入 DungeonLab .pulse 波形文本：/导入波形 <波形名称>
+        然后在下一行（或同一条消息内）粘贴 Dungeonlab+pulse:... 内容。
+        也可以直接将整段内容作为命令参数。
+        """
+        text = event.message_str.strip() if hasattr(event, 'message_str') else ""
+        # 去除命令前缀
+        for prefix in ["/导入波形", "导入波形"]:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+
+        # 尝试从文本中找到 pulse 内容
+        pulse_start = text.find("Dungeonlab+pulse")
+        if pulse_start == -1:
+            yield event.plain_result(
+                "❌ 未找到有效的 .pulse 内容。\n"
+                "用法：/导入波形 <名称>\n"
+                "Dungeonlab+pulse:...\n\n"
+                "或发送以名称作为第一行、pulse 内容作为第二行的消息。"
+            )
+            return
+
+        lines = text[:pulse_start].strip().splitlines()
+        wave_name = lines[-1].strip() if lines else ""
+        pulse_content = text[pulse_start:].strip()
+
+        if not wave_name:
+            yield event.plain_result("❌ 请在 pulse 内容前一行提供波形名称")
+            return
+
+        pulses = parse_dungeonlab_pulse(pulse_content)
+        if not pulses:
+            yield event.plain_result(f"❌ 波形解析结果为空，请确认 .pulse 格式正确（以 Dungeonlab+pulse: 开头）")
+            return
+
+        # 保存 .pulse 文件
+        if self._pulses_dir:
+            safe_name = "".join(c for c in wave_name if c.isalnum() or c in "-_()[]（）【】 ").strip()
+            if not safe_name:
+                safe_name = f"custom_{int(time.time())}"
+            file_path = self._pulses_dir / f"{safe_name}.pulse"
+            try:
+                file_path.write_text(pulse_content, encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"保存 .pulse 文件失败: {e}")
+
+        custom_pulse_data.data[wave_name] = list(pulses)
+        yield event.plain_result(
+            f"✅ 已导入波形【{wave_name}】，共 {len(pulses)} 组，已加入轮播列表"
+        )
+
+    @filter.on_message()
+    async def handle_group_pulse_file(self, event: AstrMessageEvent):
+        """监听群消息中的文件组件，若是 .pulse 文件则自动解析"""
+        try:
+            from astrbot.api.message_components import File  # type: ignore
+        except ImportError:
+            return
+
+        for comp in event.get_messages():
+            if not isinstance(comp, File):  # type: ignore
+                continue
+            name = getattr(comp, 'name', '') or getattr(comp, 'filename', '') or ''
+            if not name.lower().endswith('.pulse'):
+                continue
+
+            url = getattr(comp, 'url', '') or getattr(comp, 'file', '')
+            if not url:
+                continue
+
+            # 尝试下载并解析
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status != 200:
+                            continue
+                        content = await resp.text(encoding='utf-8', errors='replace')
+            except Exception as e:
+                logger.warning(f"下载 .pulse 文件失败: {name} - {e}")
+                continue
+
+            pulses = parse_dungeonlab_pulse(content)
+            if not pulses:
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain().message(f"⚠️ 文件 {name} 解析结果为空，已跳过")
+                )
+                continue
+
+            wave_name = name[:-6]  # 去掉 .pulse 后缀
+            custom_pulse_data.data[wave_name] = list(pulses)
+
+            if self._pulses_dir:
+                try:
+                    (self._pulses_dir / name).write_text(content, encoding="utf-8")
+                except Exception as e:
+                    logger.warning(f"保存群文件 .pulse 失败: {e}")
+
+            chain = MessageChain()
+            chain.message(f"✅ 已自动解析群文件波形【{wave_name}】，共 {len(pulses)} 组，已加入轮播列表")
+            await self.context.send_message(event.unified_msg_origin, chain)
+
     # ==================== 护盾查询 ====================
 
     @filter.command("护盾状态")
@@ -1050,12 +1122,15 @@ class DGLabPlayPlugin(Star):
         user_id = event.get_sender_id()
         charges = self._get_shield(user_id)
         if charges > 0:
-            yield event.plain_result(f"🛡️ 你当前拥有 {charges} 层反弹护盾")
+            yield event.plain_result(
+                f"🛡️ 你当前拥有 {charges} 层反弹护盾\n"
+                f"（触发概率 {int(SHIELD_TRIGGER_PROB * 100)}%，每 45 分钟补充 1 层）"
+            )
         else:
             shield = self._shields.get(user_id)
             if shield:
                 elapsed = time.time() - shield["last_recharge"]
-                remaining = max(0, int(3600 - elapsed))
+                remaining = max(0, int(SHIELD_RECHARGE_SECS - elapsed))
                 yield event.plain_result(
                     f"🛡️ 护盾已耗尽，{remaining // 60} 分 {remaining % 60} 秒后自动补充"
                 )
@@ -1269,21 +1344,19 @@ class DGLabPlayPlugin(Star):
         )
 
     async def _relay_task(self, players: list, base_pct: float, increment: float, umo: str):
-        """接力惩罚后台任务"""
+        """接力惩罚后台任务（不改变波形，只控制强度）"""
         try:
             for i, (uid, play_client) in enumerate(players):
                 if play_client.is_destroyed:
                     continue
-                pct = min(base_pct + i * increment, 100)
+                pct = min(base_pct + i * increment, MAX_STRENGTH_PCT)
                 duration = 8 + i * 3
 
-                pulse_name = await self._set_random_pulse(play_client)
                 await self._set_strength_pct(play_client, pct)
 
                 chain = MessageChain()
                 chain.message(
-                    f"🔗 接力 [{i + 1}/{len(players)}]："
-                    f"强度 {int(pct)}%，波形【{pulse_name}】，持续 {duration} 秒"
+                    f"🔗 接力 [{i + 1}/{len(players)}]：强度 {int(pct)}%，持续 {duration} 秒"
                 )
                 await self.context.send_message(umo, chain)
 
@@ -1292,7 +1365,7 @@ class DGLabPlayPlugin(Star):
                 if not play_client.is_destroyed:
                     await self._set_strength_pct(play_client, 0)
 
-                await asyncio.sleep(2)  # 间隔
+                await asyncio.sleep(2)
 
             chain = MessageChain()
             chain.message("✅ 接力惩罚全部结束！")
@@ -1351,6 +1424,10 @@ class DGLabPlayPlugin(Star):
             if not task.done():
                 task.cancel()
         self._active_tasks.clear()
+        for task in self._wave_rotation_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._wave_rotation_tasks.clear()
         if self.client_manager:
             await self.client_manager.shutdown()
         logger.info("DG-Lab-Play 插件已关闭")
