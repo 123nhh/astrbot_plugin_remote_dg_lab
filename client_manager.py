@@ -104,6 +104,8 @@ class DGLabPlayClient:
         self.pulse_task: Optional[asyncio.Task] = None
         self.is_destroyed: bool = False
 
+        self.on_app_disconnect: Optional[Callable] = None
+
         self.register_finished_lock = asyncio.Lock()
         self.bind_finished_lock = asyncio.Lock()
 
@@ -179,8 +181,11 @@ class DGLabPlayClient:
             self.last_feedback = data
         elif data == RetCode.CLIENT_DISCONNECTED:
             self._logger.info(f"终端 {self.client.client_id} 绑定的 App 已断开")
-            async with self.bind_finished_lock:
-                await self.wait_for_bind(rebind=True)
+            if self.on_app_disconnect:
+                asyncio.create_task(self.on_app_disconnect())
+            else:
+                async with self.bind_finished_lock:
+                    await self.wait_for_bind(rebind=True)
 
     async def _serve(self):
         """建立终端连接，并不断获取和处理消息"""
