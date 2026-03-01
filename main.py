@@ -224,7 +224,7 @@ def _parse_numbers_from_text(event: AstrMessageEvent) -> list:
     "astrbot_plugin_remote_dg_lab",
     "Ljzd-PRO & AstrBot Porter",
     "DG-Lab-Play 郊狼玩法 - 在群里和大家一起玩郊狼吧！",
-    "1.6.0",
+    "1.6.1",
     "https://github.com/123nhh/astrbot_plugin_remote_dg_lab",
 )
 class DGLabPlayPlugin(Star):
