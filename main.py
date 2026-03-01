@@ -1487,7 +1487,7 @@ class DGLabPlayPlugin(Star):
         )
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    async def handle_group_pulse_file(self, event: AstrMessageEvent):
+    async def handle_group_pulse_file(self, event: AstrMessageEvent, **kwargs):
         """
         监听消息中的文件组件，若是 .pulse 文件则自动下载并解析。
         使用 AstrBot 内置 File.get_file() 异步 API，自动处理平台差异（本地路径 / URL 下载）。
