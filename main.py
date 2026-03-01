@@ -1747,7 +1747,7 @@ class DGLabPlayPlugin(Star):
                     f" 🔢 猜数字游戏开始！\n"
                     f"系统已生成 1-100 的随机数，你有 5 次机会\n"
                     f"每次猜错只提示大了还是小了，并受到惩罚\n"
-                    f"偏差 ±5 以内算猜对，猜对则发起者受罚！\n"
+                    f"偏差 ±2 以内算猜对，猜对则发起者受罚！\n"
                     f"请发送 /猜 <数字> 进行猜测"
                 ),
             ]
@@ -1776,8 +1776,8 @@ class DGLabPlayPlugin(Star):
 
         diff = abs(guess - answer)
 
-        if diff <= 5:
-            # ±5 以内算猜对！惩罚发起者
+        if diff <= 2:
+            # ±2 以内算猜对！惩罚发起者
             self._guess_games.pop(user_id, None)
             attacker_id = game["attacker"]
             attacker_client = self.client_manager.user_id_to_client.get(attacker_id)
