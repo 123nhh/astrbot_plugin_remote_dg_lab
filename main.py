@@ -1313,31 +1313,14 @@ class DGLabPlayPlugin(Star):
         sender_client = self.client_manager.user_id_to_client.get(sender_id)
         reflected = await self._try_shield_reflect(
             sender_id,
-            target,
+            target_uid,
             event.unified_msg_origin,
             play_client,
             sender_client,
-            lambda sc, sid: self._storm_task(
-                sc, sid, event.unified_msg_origin, duration, times
+            lambda sc, sid: self._dice_punishment_task(
+                sc, sid, event.unified_msg_origin, (pct, pct), duration
             ),
         )
-        if not reflected:
-            yield event.chain_result(
-                [
-                    At(qq=target),
-                    Plain(
-                        f" 🌪️ 随机风暴来袭！强度随机变化，持续 {int(duration)} 秒，共 {times} 次波动！"
-                    ),
-                ]
-            )
-            self._enqueue_punishment(
-                target,
-                self._storm_task(
-                    play_client, target, event.unified_msg_origin, duration, times
-                ),
-                f"🌪️ 随机风暴 {int(duration)}秒 {times}次",
-                event.unified_msg_origin,
-            )
         if reflected:
             return
 
