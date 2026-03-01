@@ -25,7 +25,12 @@ from astrbot.api import logger, AstrBotConfig
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from .client_manager import ClientManager, DGLabPlayConfig
-from .model import custom_pulse_data, load_custom_pulse_data, parse_dungeonlab_pulse, load_pulse_files_from_dir
+from .model import (
+    custom_pulse_data,
+    load_custom_pulse_data,
+    parse_dungeonlab_pulse,
+    load_pulse_files_from_dir,
+)
 
 
 MAX_STRENGTH_PCT = 90.0
@@ -36,6 +41,7 @@ SHIELD_TRIGGER_PROB = 0.45
 
 SHIELD_RECHARGE_SECS = 2700
 """护盾充能间隔（秒），45 分钟"""
+
 
 # ==================== 回复文本常量 ====================
 class ReplyText:
@@ -99,6 +105,10 @@ USAGE_TEXT = """\
 每位玩家绑定后自动获得反弹护盾（每 45 分钟自动补充 1 层）
 加强度 ≥30% 或受其他惩罚时，护盾有概率随机触发，反弹给攻击者
 
+🔥 预热保护机制：
+绑定后强度上限从 10% 开始，10 分钟内缓慢升至 90%（对数曲线）
+查看当前上限：/预热状态
+
 
 ⚠️ 如果你自己也连接了郊狼，制裁别人时你同样会被制裁（仅限一键制裁）
 
@@ -109,34 +119,53 @@ USAGE_TEXT = """\
 # ==================== 骰子结果表 ====================
 DICE_OUTCOMES = [
     {
-        "face": "⚀", "value": 1, "name": "平安无事",
+        "face": "⚀",
+        "value": 1,
+        "name": "平安无事",
         "desc": "幸运！什么都没有发生~",
-        "strength": None, "duration": 0,
+        "strength": None,
+        "duration": 0,
     },
     {
-        "face": "⚁", "value": 2, "name": "微风拂过",
+        "face": "⚁",
+        "value": 2,
+        "name": "微风拂过",
         "desc": "一阵微弱的电流掠过...",
-        "strength": (10, 30), "duration": 10,
+        "strength": (10, 30),
+        "duration": 10,
     },
     {
-        "face": "⚂", "value": 3, "name": "电流穿行",
+        "face": "⚂",
+        "value": 3,
+        "name": "电流穿行",
         "desc": "感觉来了！电流在体内穿行！",
-        "strength": (30, 60), "duration": 20,
+        "strength": (30, 60),
+        "duration": 20,
     },
     {
-        "face": "⚃", "value": 4, "name": "雷霆洗礼",
+        "face": "⚃",
+        "value": 4,
+        "name": "雷霆洗礼",
         "desc": "轰！！！雷霆万钧！",
-        "strength": (60, 85), "duration": 30,
+        "strength": (60, 85),
+        "duration": 30,
     },
     {
-        "face": "⚄", "value": 5, "name": "极限风暴",
+        "face": "⚄",
+        "value": 5,
+        "name": "极限风暴",
         "desc": "暴风雨来临！！无处可逃！！！",
-        "strength": (85, 100), "duration": 45,
+        "strength": (85, 100),
+        "duration": 45,
     },
     {
-        "face": "⚅", "value": 6, "name": "命运逆转",
+        "face": "⚅",
+        "value": 6,
+        "name": "命运逆转",
         "desc": "命运的齿轮开始转动...惩罚反弹给施法者！",
-        "strength": (50, 100), "duration": 30, "reverse": True,
+        "strength": (50, 100),
+        "duration": 30,
+        "reverse": True,
     },
 ]
 
@@ -145,7 +174,7 @@ def _get_at_target(event: AstrMessageEvent) -> Optional[str]:
     """从消息链中提取 @ 的目标用户 ID"""
     for comp in event.get_messages():
         if isinstance(comp, At):
-            target = str(comp.qq) if hasattr(comp, 'qq') and comp.qq else None
+            target = str(comp.qq) if hasattr(comp, "qq") and comp.qq else None
             if target and target != "all":
                 return target
     return None
@@ -191,9 +220,13 @@ def _parse_numbers_from_text(event: AstrMessageEvent) -> list:
     return numbers
 
 
-@register("astrbot_plugin_remote_dg_lab", "Ljzd-PRO & AstrBot Porter",
-          "DG-Lab-Play 郊狼玩法 - 在群里和大家一起玩郊狼吧！", "1.5.0",
-          "https://github.com/123nhh/astrbot_plugin_remote_dg_lab")
+@register(
+    "astrbot_plugin_remote_dg_lab",
+    "Ljzd-PRO & AstrBot Porter",
+    "DG-Lab-Play 郊狼玩法 - 在群里和大家一起玩郊狼吧！",
+    "1.6.0",
+    "https://github.com/123nhh/astrbot_plugin_remote_dg_lab",
+)
 class DGLabPlayPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -203,8 +236,12 @@ class DGLabPlayPlugin(Star):
         self._data_dir: Optional[Path] = None
         self._active_tasks: dict = {}  # user_id -> asyncio.Task
         # 一键制裁限制：记录时间戳
-        self._sanction_attacker_log: Dict[str, List[float]] = defaultdict(list)  # 施法者 -> [时间戳]
-        self._sanction_victim_log: Dict[str, List[float]] = defaultdict(list)    # 被控者 -> [时间戳]
+        self._sanction_attacker_log: Dict[str, List[float]] = defaultdict(
+            list
+        )  # 施法者 -> [时间戳]
+        self._sanction_victim_log: Dict[str, List[float]] = defaultdict(
+            list
+        )  # 被控者 -> [时间戳]
         # 待审批的制裁请求: victim_id -> (attacker_id, play_client, umo, duration)
         self._pending_sanctions: Dict[str, Tuple[str, object, str, float]] = {}
         # 反弹护盾: user_id -> {"charges": int, "last_recharge": float}
@@ -227,7 +264,9 @@ class DGLabPlayPlugin(Star):
         try:
             self.dg_config = DGLabPlayConfig(self.config)
 
-            self._data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_remote_dg_lab"
+            self._data_dir = (
+                Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_remote_dg_lab"
+            )
             self._data_dir.mkdir(parents=True, exist_ok=True)
 
             self._pulses_dir = self._data_dir / "pulses"
@@ -253,6 +292,7 @@ class DGLabPlayPlugin(Star):
         except Exception as e:
             logger.error(f"❌ DG-Lab-Play 插件初始化失败: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
 
     def _generate_qr_image(self, qrcode_data: str, user_id: str) -> str:
@@ -281,10 +321,9 @@ class DGLabPlayPlugin(Star):
         qrcode_data = play_client.qrcode
         qr_path = self._generate_qr_image(qrcode_data, user_id)
 
-        yield event.chain_result([
-            Image.fromFileSystem(qr_path),
-            Plain(ReplyText.please_scan_qrcode)
-        ])
+        yield event.chain_result(
+            [Image.fromFileSystem(qr_path), Plain(ReplyText.please_scan_qrcode)]
+        )
 
         # 后台等待绑定完成并通知
         asyncio.create_task(self._wait_bind_result(play_client, umo))
@@ -297,23 +336,34 @@ class DGLabPlayPlugin(Star):
         chain = MessageChain()
         if not play_client.is_destroyed:
             self._bind_time[play_client.user_id] = time.time()
-            chain.message(
-                ReplyText.successfully_bind + "\n\n"
-                "🛡️ 你已获得一层『反弹护盾』！\n"
-                "• 当你被 ≥30% 强度攻击或受到惩罚时，护盾有概率随机触发，将惩罚反弹给攻击者\n"
-                "• 每 45 分钟自动补充 1 层，最多拥有 1 层\n"
-                "• 私聊发送 /护盾状态 可查看护盾情况"
+            init_pct = int(self.dg_config.warmup_initial_pct)
+            warmup_min = int(self.dg_config.warmup_duration_minutes)
+            chain = MessageChain(
+                [
+                    Plain(
+                        ReplyText.successfully_bind + "\n\n"
+                        f"🔥 预热保护已启动！\n"
+                        f"• 当前强度上限：{init_pct}%，将在 {warmup_min} 分钟内缓慢升至 {int(MAX_STRENGTH_PCT)}%\n"
+                        f"• 发送 /预热状态 可查看当前上限进度\n\n"
+                        "🛡️ 你已获得一层『反弹护盾』！\n"
+                        "• 当你被 ≥30% 强度攻击或受到惩罚时，护盾有概率随机触发，将惩罚反弹给攻击者\n"
+                        "• 每 45 分钟自动补充 1 层，最多拥有 1 层\n"
+                        "• 发送 /护盾状态 可查看护盾情况"
+                    )
+                ]
             )
             self._grant_shield(play_client.user_id)
             self._start_wave_rotation(play_client.user_id, play_client)
             # 注册 App 断开连接回调（App 量退出时自动移除玩家）
             _uid = play_client.user_id
             _umo = umo
+
             async def _on_app_disconnect(_uid=_uid, _umo=_umo):
                 await self._handle_app_disconnect(_uid, _umo)
+
             play_client.on_app_disconnect = _on_app_disconnect
         else:
-            chain.message(ReplyText.bind_timeout)
+            chain = MessageChain([Plain(ReplyText.bind_timeout)])
 
         try:
             await self.context.send_message(umo, chain)
@@ -364,7 +414,9 @@ class DGLabPlayPlugin(Star):
             await play_client.destroy()
         # 通知群组
         try:
-            chain = MessageChain([At(qq=user_id), Plain(" 📱 App 已断开连接，已自动退出游戏")])
+            chain = MessageChain(
+                [At(qq=user_id), Plain(" 📱 App 已断开连接，已自动退出游戏")]
+            )
             await self.context.send_message(umo, chain)
         except Exception as e:
             logger.error(f"发送 App 断开提示失败: {e}")
@@ -372,18 +424,22 @@ class DGLabPlayPlugin(Star):
     # ==================== 强度控制指令 ====================
 
     async def _strength_control(
-        self, event: AstrMessageEvent,
+        self,
+        event: AstrMessageEvent,
         mode: StrengthOperationType,
         target_user_id: str,
-        percentage_value: Optional[float]
+        percentage_value: Optional[float],
     ):
-        """通用强度控制逻辑（上限 MAX_STRENGTH_PCT）"""
+        """
+        通用强度控制逻辑。
+        统一换算为 SET_TO 模式发送绝对值，确保预热保护上限对 INCREASE 也生效。
+        - INCREASE：目标 = 当前百分比 + percentage_value
+        - DECREASE：目标 = 当前百分比 - percentage_value（不受预热限制，可降到 0）
+        - SET_TO：目标 = percentage_value
+        """
         if percentage_value is None or not (0 < percentage_value <= 100):
             yield event.plain_result(ReplyText.invalid_strength_param)
             return
-
-        # 非制裁类强度控制限制上限
-        percentage_value = min(percentage_value, MAX_STRENGTH_PCT)
 
         play_client = self.client_manager.user_id_to_client.get(target_user_id)
         if not play_client:
@@ -394,20 +450,56 @@ class DGLabPlayPlugin(Star):
             yield event.plain_result(ReplyText.failed_to_fetch_strength_limit)
             return
 
-        a_value = round(play_client.last_strength.a_limit * (percentage_value / 100))
-        b_value = round(play_client.last_strength.b_limit * (percentage_value / 100))
-
-        await play_client.client.set_strength(Channel.A, mode, a_value)
-        await play_client.client.set_strength(Channel.B, mode, b_value)
+        ls = play_client.last_strength
+        # 计算当前强度百分比（取 A 通道，与 B 通道保持一致）
+        current_pct = (ls.a / ls.a_limit * 100.0) if ls.a_limit > 0 else 0.0
 
         if mode == StrengthOperationType.INCREASE:
-            success_text = ReplyText.successfully_increased.format(round(percentage_value))
+            target_pct = current_pct + percentage_value
         elif mode == StrengthOperationType.DECREASE:
-            success_text = ReplyText.successfully_decreased.format(round(percentage_value))
-        elif mode == StrengthOperationType.SET_TO:
-            success_text = ReplyText.successfully_set_to_strength.format(round(percentage_value))
+            target_pct = current_pct - percentage_value
+        else:  # SET_TO
+            target_pct = percentage_value
+
+        # DECREASE 允许降到 0，INCREASE / SET_TO 受预热保护限制
+        if mode == StrengthOperationType.DECREASE:
+            target_pct = max(0.0, min(target_pct, MAX_STRENGTH_PCT))
+            bypass_warmup = True
         else:
-            return
+            target_pct = max(0.0, min(target_pct, MAX_STRENGTH_PCT))
+            bypass_warmup = False
+
+        warmup_cap = self._get_warmup_cap(target_user_id)
+        capped = False
+        if not bypass_warmup and target_pct > warmup_cap:
+            target_pct = warmup_cap
+            capped = True
+
+        a_val = round(ls.a_limit * (target_pct / 100))
+        b_val = round(ls.b_limit * (target_pct / 100))
+        await play_client.client.set_strength(
+            Channel.A, StrengthOperationType.SET_TO, a_val
+        )
+        await play_client.client.set_strength(
+            Channel.B, StrengthOperationType.SET_TO, b_val
+        )
+
+        cap_hint = f"（预热保护限制为 {int(warmup_cap)}%）" if capped else ""
+
+        if mode == StrengthOperationType.INCREASE:
+            success_text = (
+                ReplyText.successfully_increased.format(round(percentage_value))
+                + cap_hint
+            )
+        elif mode == StrengthOperationType.DECREASE:
+            success_text = ReplyText.successfully_decreased.format(
+                round(percentage_value)
+            )
+        else:
+            success_text = (
+                ReplyText.successfully_set_to_strength.format(round(target_pct))
+                + cap_hint
+            )
 
         yield event.plain_result(success_text)
 
@@ -426,17 +518,25 @@ class DGLabPlayPlugin(Star):
             play_client = self.client_manager.user_id_to_client.get(target)
             sender_client = self.client_manager.user_id_to_client.get(sender_id)
             reflected = await self._try_shield_reflect(
-                sender_id, target, event.unified_msg_origin,
-                play_client, sender_client,
+                sender_id,
+                target,
+                event.unified_msg_origin,
+                play_client,
+                sender_client,
                 lambda sc, sid: self._dice_punishment_task(
-                    sc, sid, event.unified_msg_origin,
-                    (int(percentage), int(min(percentage + 20, MAX_STRENGTH_PCT))), 15
-                )
+                    sc,
+                    sid,
+                    event.unified_msg_origin,
+                    (int(percentage), int(min(percentage + 20, MAX_STRENGTH_PCT))),
+                    15,
+                ),
             )
             if reflected:
                 return
 
-        async for result in self._strength_control(event, StrengthOperationType.INCREASE, target, percentage):
+        async for result in self._strength_control(
+            event, StrengthOperationType.INCREASE, target, percentage
+        ):
             yield result
 
     @filter.command("减小强度")
@@ -447,7 +547,9 @@ class DGLabPlayPlugin(Star):
             yield event.plain_result(ReplyText.please_at_target)
             return
         percentage = _parse_percentage_from_text(event)
-        async for result in self._strength_control(event, StrengthOperationType.DECREASE, target, percentage):
+        async for result in self._strength_control(
+            event, StrengthOperationType.DECREASE, target, percentage
+        ):
             yield result
 
     @filter.command("随机强度")
@@ -458,7 +560,9 @@ class DGLabPlayPlugin(Star):
             yield event.plain_result(ReplyText.please_at_target)
             return
         random_value = float(random.randint(0, 100))
-        async for result in self._strength_control(event, StrengthOperationType.SET_TO, target, random_value):
+        async for result in self._strength_control(
+            event, StrengthOperationType.SET_TO, target, random_value
+        ):
             yield result
 
     # ==================== 强度查询指令 ====================
@@ -494,7 +598,10 @@ class DGLabPlayPlugin(Star):
     async def show_pulses(self, event: AstrMessageEvent):
         """列出所有可用波形名称"""
         if custom_pulse_data:
-            yield event.plain_result("🎵 当前可用波形（系统自动轮播，无需手动切换）：\n" + "、".join(custom_pulse_data.keys))
+            yield event.plain_result(
+                "🎵 当前可用波形（系统自动轮播，无需手动切换）：\n"
+                + "、".join(custom_pulse_data.keys)
+            )
         else:
             yield event.plain_result(ReplyText.no_available_pulse)
 
@@ -507,16 +614,42 @@ class DGLabPlayPlugin(Star):
 
     # ==================== 内部辅助方法 ====================
 
-    async def _set_strength_pct(self, play_client, percentage: float, bypass_cap: bool = False) -> bool:
+    async def _wait_strength_ready(self, play_client, timeout: float = 10.0) -> bool:
+        """等待 play_client.last_strength 就绪，最多等待 timeout 秒。返回是否就绪。"""
+        if play_client.last_strength is not None:
+            return True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if play_client.is_destroyed:
+                return False
+            if play_client.last_strength is not None:
+                return True
+            await asyncio.sleep(0.3)
+        logger.warning(f"等待 last_strength 超时 [{play_client.user_id}]")
+        return False
+
+    async def _set_strength_pct(
+        self, play_client, percentage: float, bypass_cap: bool = False
+    ) -> bool:
         """直接设置玩家强度为指定百分比（默认上限 MAX_STRENGTH_PCT，并应用预热保护）"""
-        if not play_client.last_strength or play_client.is_destroyed:
+        if play_client.is_destroyed:
             return False
-        cap = 100.0 if bypass_cap else min(MAX_STRENGTH_PCT, self._get_warmup_cap(play_client.user_id))
+        if play_client.last_strength is None:
+            return False
+        cap = (
+            100.0
+            if bypass_cap
+            else min(MAX_STRENGTH_PCT, self._get_warmup_cap(play_client.user_id))
+        )
         pct = min(percentage, cap)
         a_val = round(play_client.last_strength.a_limit * (pct / 100))
         b_val = round(play_client.last_strength.b_limit * (pct / 100))
-        await play_client.client.set_strength(Channel.A, StrengthOperationType.SET_TO, a_val)
-        await play_client.client.set_strength(Channel.B, StrengthOperationType.SET_TO, b_val)
+        await play_client.client.set_strength(
+            Channel.A, StrengthOperationType.SET_TO, a_val
+        )
+        await play_client.client.set_strength(
+            Channel.B, StrengthOperationType.SET_TO, b_val
+        )
         return True
 
     # ==================== 波形背景轮播 ====================
@@ -593,36 +726,70 @@ class DGLabPlayPlugin(Star):
 
     def _get_warmup_cap(self, user_id: str) -> float:
         """
-        对数函数式预热保护：刚绑定后强度上限约 10%，30 分钟内逐渐升至 MAX_STRENGTH_PCT。
-        公式：cap = 10 + (MAX - 10) * log(1 + t/60) / log(1 + 1800/60)
+        对数函数式预热保护：刚绑定后强度上限为 warmup_initial_pct，
+        经过 warmup_duration_minutes 分钟后缓慢升至 MAX_STRENGTH_PCT。
+        公式：cap = init + (MAX - init) * log(1 + t/60) / log(1 + T/60)
         """
         import math
+
         bind_time = self._bind_time.get(user_id)
         if bind_time is None:
             return MAX_STRENGTH_PCT
+
+        T_secs = self.dg_config.warmup_duration_minutes * 60.0
+        init = self.dg_config.warmup_initial_pct
+
         elapsed = time.time() - bind_time
-        T = 1800.0  # 30 分钟完全预热
-        if elapsed >= T:
+        if elapsed >= T_secs:
             return MAX_STRENGTH_PCT
-        cap = 10.0 + (MAX_STRENGTH_PCT - 10.0) * math.log(1.0 + elapsed / 60) / math.log(1.0 + T / 60)
-        return max(10.0, min(cap, MAX_STRENGTH_PCT))
+
+        cap = init + (MAX_STRENGTH_PCT - init) * math.log(
+            1.0 + elapsed / 60.0
+        ) / math.log(1.0 + T_secs / 60.0)
+        return max(init, min(cap, MAX_STRENGTH_PCT))
 
     # ==================== 惩罚队列 ====================
 
-    def _enqueue_punishment(self, user_id: str, coro, description: str = "", umo: str = ""):
-        """将惩罚协程加入该玩家的惩罚队列，避免被后来惩罚顶掉，每次间隔 10 秒依次执行"""
+    def _enqueue_punishment(
+        self, user_id: str, coro, description: str = "", umo: str = ""
+    ):
+        """将惩罚协程加入该玩家的惩罚队列，并根据当前队列长度决定提示内容"""
         if user_id not in self._punishment_queues:
             self._punishment_queues[user_id] = asyncio.Queue()
-        self._punishment_queues[user_id].put_nowait((description, umo, coro))
-        # 若处理器未运行则启动
+
+        q = self._punishment_queues[user_id]
+        # 判断当前是否有处理器在运行（即是否有惩罚正在执行或等待）
         proc = self._queue_processors.get(user_id)
-        if proc is None or proc.done():
+        proc_running = proc is not None and not proc.done()
+        position = q.qsize()  # 入队前的等待数量
+
+        q.put_nowait((description, umo, coro))
+
+        # 仅当排队等待时才发入队通知（立即执行的由处理器在取出时发"开始"通知）
+        if umo and description and proc_running and position >= 0:
+            asyncio.create_task(
+                self._send_enqueue_notice(user_id, umo, description, position + 1)
+            )
+
+        # 若处理器未运行则启动
+        if not proc_running:
             self._queue_processors[user_id] = asyncio.create_task(
                 self._punishment_queue_processor(user_id)
             )
 
+    async def _send_enqueue_notice(
+        self, user_id: str, umo: str, description: str, queue_pos: int
+    ):
+        """发送排队等待通知"""
+        try:
+            msg = f" 📋 惩罚已加入队列（第 {queue_pos} 位等待）：{description}"
+            chain = MessageChain([At(qq=user_id), Plain(msg)])
+            await self.context.send_message(umo, chain)
+        except Exception as e:
+            logger.error(f"发送入队通知失败: {e}")
+
     async def _punishment_queue_processor(self, user_id: str):
-        """惩罚队列处理器：依次执行队列中的惩罚，执行前后发出提示，每次间隔 10 秒"""
+        """惩罚队列处理器：依次执行队列中的惩罚，执行前发开始通知，执行后发结束通知"""
         q = self._punishment_queues.get(user_id)
         if q is None:
             return
@@ -632,7 +799,7 @@ class DGLabPlayPlugin(Star):
                 # 执行前通知
                 if umo:
                     try:
-                        pre_msg = f" 🔔 即将开始惩罚{('：' + desc) if desc else ''}"
+                        pre_msg = f" ⚡ 惩罚开始！{desc}" if desc else " ⚡ 惩罚开始！"
                         chain = MessageChain([At(qq=user_id), Plain(pre_msg)])
                         await self.context.send_message(umo, chain)
                     except Exception:
@@ -649,22 +816,30 @@ class DGLabPlayPlugin(Star):
                 if umo:
                     try:
                         remaining = q.qsize()
-                        rest_msg = " ⏸️ 惩罚结束，休息 10 秒..."
                         if remaining > 0:
-                            rest_msg += f"（队列还有 {remaining} 项等待）"
+                            rest_msg = f" ✅ 惩罚结束，休息 10 秒（队列还有 {remaining} 项）..."
+                        else:
+                            rest_msg = " ✅ 惩罚结束！"
                         chain = MessageChain([At(qq=user_id), Plain(rest_msg)])
                         await self.context.send_message(umo, chain)
                     except Exception:
                         pass
-                await asyncio.sleep(10)
+                if q.qsize() > 0:
+                    await asyncio.sleep(10)
         except asyncio.CancelledError:
             pass
         finally:
             self._queue_processors.pop(user_id, None)
 
-    async def _try_shield_reflect(self, attacker_id: str, victim_id: str,
-                                   event_or_umo, play_client, attacker_client,
-                                   punishment_coro_factory) -> bool:
+    async def _try_shield_reflect(
+        self,
+        attacker_id: str,
+        victim_id: str,
+        event_or_umo,
+        play_client,
+        attacker_client,
+        punishment_coro_factory,
+    ) -> bool:
         """
         检查被攻击者是否有护盾，如果有则反弹惩罚给攻击者。
         返回 True 表示护盾触发了（已反弹），调用方应终止原始惩罚。
@@ -672,33 +847,50 @@ class DGLabPlayPlugin(Star):
         if not self._consume_shield(victim_id):
             return False
         # 护盾触发！
-        umo = event_or_umo if isinstance(event_or_umo, str) else event_or_umo.unified_msg_origin
+        umo = (
+            event_or_umo
+            if isinstance(event_or_umo, str)
+            else event_or_umo.unified_msg_origin
+        )
         if attacker_client and not attacker_client.is_destroyed:
-            chain = MessageChain()
-            chain.message(
-                f"🛡️ 反弹护盾触发！惩罚被反弹给了攻击者！"
+            try:
+                chain = MessageChain([Plain("🛡️ 反弹护盾触发！惩罚被反弹给了攻击者！")])
+                await self.context.send_message(umo, chain)
+            except Exception as e:
+                logger.error(f"护盾反弹通知发送失败: {e}")
+            self._enqueue_punishment(
+                attacker_id,
+                punishment_coro_factory(attacker_client, attacker_id),
+                "🛡️ 护盾反弹惩罚",
+                umo,
             )
-            try:
-                await self.context.send_message(umo, chain)
-            except Exception:
-                pass
-            self._enqueue_punishment(attacker_id, punishment_coro_factory(attacker_client, attacker_id), "🛡️ 护盾反弹惩罚", umo)
         else:
-            chain = MessageChain()
-            chain.message("🛡️ 反弹护盾触发！但攻击者未绑定设备，惩罚已抵消！")
             try:
+                chain = MessageChain(
+                    [Plain("🛡️ 反弹护盾触发！但攻击者未绑定设备，惩罚已抵消！")]
+                )
                 await self.context.send_message(umo, chain)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"护盾抵消通知发送失败: {e}")
         return True
 
     # ==================== 玩法后台任务 ====================
 
-    async def _dice_punishment_task(self, play_client, target_uid: str, umo: str,
-                                     strength_range: tuple, duration: int):
+    async def _dice_punishment_task(
+        self,
+        play_client,
+        target_uid: str,
+        umo: str,
+        strength_range: tuple,
+        duration: int,
+    ):
         """骰子惩罚后台任务（静默执行，不再发中间消息）"""
         try:
-            pct = min(random.randint(strength_range[0], strength_range[1]), MAX_STRENGTH_PCT)
+            if not await self._wait_strength_ready(play_client):
+                return
+            pct = min(
+                random.randint(strength_range[0], strength_range[1]), MAX_STRENGTH_PCT
+            )
             await self._set_strength_pct(play_client, pct)
             await asyncio.sleep(duration)
             if not play_client.is_destroyed:
@@ -714,21 +906,23 @@ class DGLabPlayPlugin(Star):
         finally:
             self._active_tasks.pop(target_uid, None)
 
-    async def _storm_task(self, play_client, target_uid: str, umo: str,
-                           duration: float, times: int):
+    async def _storm_task(
+        self, play_client, target_uid: str, umo: str, duration: float, times: int
+    ):
         """
         随机风暴后台任务。
         - 若玩家当前强度为 0，则从小到大递增，逐步趋向 ±30% 的稳定区间。
-        - 最终以一条合并消息播报所有步骤。
         - 强度上限 MAX_STRENGTH_PCT。
         """
         interval = duration / max(times, 1)
         try:
+            if not await self._wait_strength_ready(play_client):
+                return
             # 检测当前强度是否为 0，决定是否使用渐进模式
             current_is_zero = (
-                play_client.last_strength is not None and
-                play_client.last_strength.a == 0 and
-                play_client.last_strength.b == 0
+                play_client.last_strength is not None
+                and play_client.last_strength.a == 0
+                and play_client.last_strength.b == 0
             )
 
             for i in range(times):
@@ -760,13 +954,16 @@ class DGLabPlayPlugin(Star):
         finally:
             self._active_tasks.pop(target_uid, None)
 
-    async def _gradual_task(self, play_client, target_uid: str, umo: str,
-                             duration: float, final_pct: float):
+    async def _gradual_task(
+        self, play_client, target_uid: str, umo: str, duration: float, final_pct: float
+    ):
         """渐强惩罚后台任务：强度从 0 线性升至目标百分比（上限 MAX_STRENGTH_PCT）"""
         final_pct = min(final_pct, MAX_STRENGTH_PCT)
         steps = min(int(duration), 20)
         interval = duration / max(steps, 1)
         try:
+            if not await self._wait_strength_ready(play_client):
+                return
             for i in range(1, steps + 1):
                 if play_client.is_destroyed:
                     break
@@ -788,10 +985,13 @@ class DGLabPlayPlugin(Star):
         finally:
             self._active_tasks.pop(target_uid, None)
 
-    async def _sanction_task(self, play_client, target_uid: str, umo: str,
-                              duration: float):
-        """一键制裁后台任务：满功率输出指定时长（绕过 90% 上限），完成后发一条合并消息"""
+    async def _sanction_task(
+        self, play_client, target_uid: str, umo: str, duration: float
+    ):
+        """一键制裁后台任务：满功率输出指定时长（绕过 90% 上限）"""
         try:
+            if not await self._wait_strength_ready(play_client):
+                return
             await self._set_strength_pct(play_client, 100, bypass_cap=True)
             await asyncio.sleep(duration)
             if not play_client.is_destroyed:
@@ -806,6 +1006,7 @@ class DGLabPlayPlugin(Star):
             logger.error(f"一键制裁任务异常: {e}")
         finally:
             self._active_tasks.pop(target_uid, None)
+
     # ==================== 进阶玩法指令 ====================
 
     @filter.command("郊狼骰子")
@@ -855,22 +1056,31 @@ class DGLabPlayPlugin(Star):
             sender_id = event.get_sender_id()
             sender_client = self.client_manager.user_id_to_client.get(sender_id)
             reflected = await self._try_shield_reflect(
-                sender_id, actual_target, event.unified_msg_origin,
-                actual_client, sender_client,
+                sender_id,
+                actual_target,
+                event.unified_msg_origin,
+                actual_client,
+                sender_client,
                 lambda sc, sid: self._dice_punishment_task(
-                    sc, sid, event.unified_msg_origin,
-                    outcome["strength"], outcome["duration"]
-                )
+                    sc,
+                    sid,
+                    event.unified_msg_origin,
+                    outcome["strength"],
+                    outcome["duration"],
+                ),
             )
             if not reflected:
                 self._enqueue_punishment(
                     actual_target,
                     self._dice_punishment_task(
-                        actual_client, actual_target, event.unified_msg_origin,
-                        outcome["strength"], outcome["duration"]
+                        actual_client,
+                        actual_target,
+                        event.unified_msg_origin,
+                        outcome["strength"],
+                        outcome["duration"],
                     ),
                     f"🎲 骰子惩罚 {outcome['strength'][0]}-{outcome['strength'][1]}% {outcome['duration']}秒",
-                    event.unified_msg_origin
+                    event.unified_msg_origin,
                 )
 
     @filter.command("随机风暴")
@@ -897,16 +1107,23 @@ class DGLabPlayPlugin(Star):
         sender_id = event.get_sender_id()
         sender_client = self.client_manager.user_id_to_client.get(sender_id)
         reflected = await self._try_shield_reflect(
-            sender_id, target, event.unified_msg_origin,
-            play_client, sender_client,
-            lambda sc, sid: self._storm_task(sc, sid, event.unified_msg_origin, duration, times)
+            sender_id,
+            target,
+            event.unified_msg_origin,
+            play_client,
+            sender_client,
+            lambda sc, sid: self._storm_task(
+                sc, sid, event.unified_msg_origin, duration, times
+            ),
         )
         if not reflected:
             self._enqueue_punishment(
                 target,
-                self._storm_task(play_client, target, event.unified_msg_origin, duration, times),
+                self._storm_task(
+                    play_client, target, event.unified_msg_origin, duration, times
+                ),
                 f"🌪️ 随机风暴 {int(duration)}秒 {times}次",
-                event.unified_msg_origin
+                event.unified_msg_origin,
             )
 
     @filter.command("渐强惩罚")
@@ -933,16 +1150,23 @@ class DGLabPlayPlugin(Star):
         sender_id = event.get_sender_id()
         sender_client = self.client_manager.user_id_to_client.get(sender_id)
         reflected = await self._try_shield_reflect(
-            sender_id, target, event.unified_msg_origin,
-            play_client, sender_client,
-            lambda sc, sid: self._gradual_task(sc, sid, event.unified_msg_origin, duration, final_pct)
+            sender_id,
+            target,
+            event.unified_msg_origin,
+            play_client,
+            sender_client,
+            lambda sc, sid: self._gradual_task(
+                sc, sid, event.unified_msg_origin, duration, final_pct
+            ),
         )
         if not reflected:
             self._enqueue_punishment(
                 target,
-                self._gradual_task(play_client, target, event.unified_msg_origin, duration, final_pct),
+                self._gradual_task(
+                    play_client, target, event.unified_msg_origin, duration, final_pct
+                ),
                 f"📈 渐强惩罚 至{int(final_pct)}% {int(duration)}秒",
-                event.unified_msg_origin
+                event.unified_msg_origin,
             )
 
     @filter.command("一键制裁")
@@ -988,18 +1212,27 @@ class DGLabPlayPlugin(Star):
         # 检查被控者限制：每小时免审 1 次，超过需要审批
         if len(self._sanction_victim_log[target]) >= 1:
             # 需要被控者批准
-            self._pending_sanctions[target] = (sender_id, play_client, event.unified_msg_origin, duration)
-            yield event.chain_result([
-                At(qq=target),
-                Plain(
-                    f" 你在 1 小时内已被制裁过，本次需要你的批准\n"
-                    f"发起人：{event.get_sender_name()}\n"
-                    f"制裁时长：{int(duration)} 秒\n"
-                    f"请发送 /批准制裁 同意，或忽略拒绝（30 秒后自动过期）"
-                )
-            ])
+            self._pending_sanctions[target] = (
+                sender_id,
+                play_client,
+                event.unified_msg_origin,
+                duration,
+            )
+            yield event.chain_result(
+                [
+                    At(qq=target),
+                    Plain(
+                        f" 你在 1 小时内已被制裁过，本次需要你的批准\n"
+                        f"发起人：{event.get_sender_name()}\n"
+                        f"制裁时长：{int(duration)} 秒\n"
+                        f"请发送 /批准制裁 同意，或忽略拒绝（30 秒后自动过期）"
+                    ),
+                ]
+            )
             # 30 秒后自动过期
-            asyncio.create_task(self._sanction_approval_timeout(target, event.unified_msg_origin))
+            asyncio.create_task(
+                self._sanction_approval_timeout(target, event.unified_msg_origin)
+            )
             return
 
         # 免审执行
@@ -1009,16 +1242,23 @@ class DGLabPlayPlugin(Star):
         # 护盾检查
         sender_client = self.client_manager.user_id_to_client.get(sender_id)
         reflected = await self._try_shield_reflect(
-            sender_id, target, event.unified_msg_origin,
-            play_client, sender_client,
-            lambda sc, sid: self._sanction_task(sc, sid, event.unified_msg_origin, duration)
+            sender_id,
+            target,
+            event.unified_msg_origin,
+            play_client,
+            sender_client,
+            lambda sc, sid: self._sanction_task(
+                sc, sid, event.unified_msg_origin, duration
+            ),
         )
         if not reflected:
             self._enqueue_punishment(
                 target,
-                self._sanction_task(play_client, target, event.unified_msg_origin, duration),
+                self._sanction_task(
+                    play_client, target, event.unified_msg_origin, duration
+                ),
                 f"💀 一键制裁 {int(duration)}秒",
-                event.unified_msg_origin
+                event.unified_msg_origin,
             )
 
     async def _sanction_approval_timeout(self, target: str, umo: str):
@@ -1027,8 +1267,7 @@ class DGLabPlayPlugin(Star):
         if target in self._pending_sanctions:
             self._pending_sanctions.pop(target, None)
             try:
-                chain = MessageChain()
-                chain.message("⏰ 制裁请求已过期，未获得批准")
+                chain = MessageChain([Plain("⏰ 制裁请求已过期，未获得批准")])
                 await self.context.send_message(umo, chain)
             except Exception:
                 pass
@@ -1053,7 +1292,7 @@ class DGLabPlayPlugin(Star):
             user_id,
             self._sanction_task(play_client, user_id, umo, duration),
             f"💀 制裁（审批通过）{int(duration)}秒",
-            umo
+            umo,
         )
         yield event.plain_result(f"✅ 已批准制裁！满功率持续 {int(duration)} 秒！")
 
@@ -1073,29 +1312,55 @@ class DGLabPlayPlugin(Star):
         sender_id = event.get_sender_id()
         sender_client = self.client_manager.user_id_to_client.get(sender_id)
         reflected = await self._try_shield_reflect(
-            sender_id, target_uid, event.unified_msg_origin,
-            play_client, sender_client,
-            lambda sc, sid: self._dice_punishment_task(sc, sid, event.unified_msg_origin, (pct, pct), duration)
+            sender_id,
+            target,
+            event.unified_msg_origin,
+            play_client,
+            sender_client,
+            lambda sc, sid: self._storm_task(
+                sc, sid, event.unified_msg_origin, duration, times
+            ),
         )
+        if not reflected:
+            yield event.chain_result(
+                [
+                    At(qq=target),
+                    Plain(
+                        f" 🌪️ 随机风暴来袭！强度随机变化，持续 {int(duration)} 秒，共 {times} 次波动！"
+                    ),
+                ]
+            )
+            self._enqueue_punishment(
+                target,
+                self._storm_task(
+                    play_client, target, event.unified_msg_origin, duration, times
+                ),
+                f"🌪️ 随机风暴 {int(duration)}秒 {times}次",
+                event.unified_msg_origin,
+            )
         if reflected:
             return
 
-        yield event.chain_result([
-            Plain(f"🎰 郊狼轮盘转动中...\n🎯 命运选中了 "),
-            At(qq=target_uid),
-            Plain(f" ！\n⚡ 随机强度 {pct}%，持续 {duration} 秒！")
-        ])
+        yield event.chain_result(
+            [
+                Plain(f"🎰 郊狼轮盘转动中...\n🎯 命运选中了 "),
+                At(qq=target_uid),
+                Plain(f" ！\n⚡ 随机强度 {pct}%，持续 {duration} 秒！"),
+            ]
+        )
 
         self._enqueue_punishment(
             target_uid,
-            self._dice_punishment_task(play_client, target_uid, event.unified_msg_origin, (pct, pct), duration),
+            self._dice_punishment_task(
+                play_client, target_uid, event.unified_msg_origin, (pct, pct), duration
+            ),
             f"🎰 轮盘惩罚 {int(pct)}% {duration}秒",
-            event.unified_msg_origin
+            event.unified_msg_origin,
         )
 
     @filter.command("停止任务")
     async def stop_gameplay_task(self, event: AstrMessageEvent):
-        """停止某玩家进行中的玩法任务：/停止任务 @用户（不能停止自己的当前惩罚）"""
+        """停止某玩家进行中的玩法任务及惩罚队列：/停止任务 @用户（不能停止自己的当前惩罚）"""
         sender_id = event.get_sender_id()
         target = _get_at_target(event)
         if not target:
@@ -1106,11 +1371,43 @@ class DGLabPlayPlugin(Star):
             yield event.plain_result("⚠️ 不能停止自己的当前惩罚哦~")
             return
 
-        task = self._active_tasks.get(target)
+        stopped = False
+
+        # 停止活跃的后台任务（旧路径，兼容接力惩罚等直接用 _start_gameplay_task 的玩法）
+        task = self._active_tasks.pop(target, None)
         if task and not task.done():
             task.cancel()
-            self._active_tasks.pop(target, None)
-            yield event.plain_result("⛔ 已停止该玩家的玩法任务，强度已归零")
+            stopped = True
+
+        # 停止惩罚队列处理器，并清空队列中的待执行项
+        proc = self._queue_processors.pop(target, None)
+        if proc and not proc.done():
+            proc.cancel()
+            stopped = True
+
+        q = self._punishment_queues.pop(target, None)
+        if q and not q.empty():
+            # 清空队列剩余项（asyncio.Queue 无 clear，逐个取出丢弃）
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                    q.task_done()
+                except Exception:
+                    break
+            stopped = True
+
+        # 将目标玩家强度归零
+        play_client = self.client_manager.user_id_to_client.get(target)
+        if play_client and not play_client.is_destroyed:
+            try:
+                await self._set_strength_pct(play_client, 0)
+            except Exception:
+                pass
+
+        if stopped:
+            yield event.plain_result(
+                "⛔ 已停止该玩家的玩法任务及待执行惩罚，强度已归零"
+            )
         else:
             yield event.plain_result("当前没有正在进行的玩法任务")
 
@@ -1142,7 +1439,7 @@ class DGLabPlayPlugin(Star):
         # 去除命令前缀
         for prefix in ["/导入波形", "导入波形"]:
             if text.startswith(prefix):
-                text = text[len(prefix):].strip()
+                text = text[len(prefix) :].strip()
                 break
 
         # 尝试从文本中找到 pulse 内容
@@ -1166,12 +1463,16 @@ class DGLabPlayPlugin(Star):
 
         pulses = parse_dungeonlab_pulse(pulse_content)
         if not pulses:
-            yield event.plain_result(f"❌ 波形解析结果为空，请确认 .pulse 格式正确（以 Dungeonlab+pulse: 开头）")
+            yield event.plain_result(
+                f"❌ 波形解析结果为空，请确认 .pulse 格式正确（以 Dungeonlab+pulse: 开头）"
+            )
             return
 
         # 保存 .pulse 文件
         if self._pulses_dir:
-            safe_name = "".join(c for c in wave_name if c.isalnum() or c in "-_()[]（）【】 ").strip()
+            safe_name = "".join(
+                c for c in wave_name if c.isalnum() or c in "-_()[]（）【】 "
+            ).strip()
             if not safe_name:
                 safe_name = f"custom_{int(time.time())}"
             file_path = self._pulses_dir / f"{safe_name}.pulse"
@@ -1190,16 +1491,21 @@ class DGLabPlayPlugin(Star):
         """
         监听消息中的文件组件，若是 .pulse 文件则自动下载并解析。
         使用 AstrBot 内置 File.get_file() 异步 API，自动处理平台差异（本地路径 / URL 下载）。
+        多个文件并发处理，避免串行等待卡死。
         """
-        for comp in event.get_messages():
-            if not isinstance(comp, File):
-                continue
+        pulse_files = [
+            comp
+            for comp in event.get_messages()
+            if isinstance(comp, File)
+            and (comp.name or "").strip().lower().endswith(".pulse")
+        ]
+        if not pulse_files:
+            return
+
+        umo = event.unified_msg_origin
+
+        async def _process_one(comp: File):
             name: str = (comp.name or "").strip()
-            if not name.lower().endswith(".pulse"):
-                continue
-
-            umo = event.unified_msg_origin
-
             # 使用 AstrBot 内置 API 获取本地文件路径（URL 会自动下载到临时目录）
             try:
                 local_path = await comp.get_file()
@@ -1208,11 +1514,11 @@ class DGLabPlayPlugin(Star):
                 await self.context.send_message(
                     umo, MessageChain().message(f"⚠️ 获取文件「{name}」失败：{e}")
                 )
-                continue
+                return
 
             if not local_path:
                 logger.warning(f"无法获取 .pulse 文件路径: {name}")
-                continue
+                return
 
             # 文件大小限制：最大 2 MB
             try:
@@ -1220,9 +1526,11 @@ class DGLabPlayPlugin(Star):
                 if size > 2 * 1024 * 1024:
                     await self.context.send_message(
                         umo,
-                        MessageChain().message(f"⚠️ 文件「{name}」过大（{size // 1024} KB），已跳过")
+                        MessageChain().message(
+                            f"⚠️ 文件「{name}」过大（{size // 1024} KB），已跳过"
+                        ),
                     )
-                    continue
+                    return
             except OSError:
                 pass
 
@@ -1230,7 +1538,7 @@ class DGLabPlayPlugin(Star):
                 content = Path(local_path).read_text(encoding="utf-8", errors="replace")
             except Exception as e:
                 logger.warning(f"读取 .pulse 文件失败: {name} - {e}")
-                continue
+                return
 
             pulses = parse_dungeonlab_pulse(content)
             if not pulses:
@@ -1238,9 +1546,9 @@ class DGLabPlayPlugin(Star):
                     umo,
                     MessageChain().message(
                         f"⚠️ 文件「{name}」解析为空（不是有效的 Dungeonlab+pulse 格式），已跳过"
-                    )
+                    ),
                 )
-                continue
+                return
 
             wave_name = Path(name).stem  # 去掉 .pulse 后缀
             custom_pulse_data.data[wave_name] = list(pulses)
@@ -1256,8 +1564,13 @@ class DGLabPlayPlugin(Star):
                 umo,
                 MessageChain().message(
                     f"✅ 已解析文件波形「{wave_name}」，共 {len(pulses)} 组，已加入轮播列表"
-                )
+                ),
             )
+
+        # 并发处理所有 .pulse 文件，避免串行 await 卡死
+        await asyncio.gather(
+            *[_process_one(comp) for comp in pulse_files], return_exceptions=True
+        )
 
     # ==================== 护盾查询 ====================
 
@@ -1281,6 +1594,45 @@ class DGLabPlayPlugin(Star):
                 )
             else:
                 yield event.plain_result("🛡️ 你还没有绑定郊狼，绑定后自动获得护盾")
+
+    @filter.command("预热状态")
+    async def warmup_status(self, event: AstrMessageEvent):
+        """查看自己当前的预热保护状态和强度上限：/预热状态"""
+        import math
+
+        user_id = event.get_sender_id()
+        bind_time = self._bind_time.get(user_id)
+
+        if bind_time is None:
+            yield event.plain_result("🔥 你还没有绑定郊狼，绑定后自动启动预热保护")
+            return
+
+        T_secs = self.dg_config.warmup_duration_minutes * 60.0
+        init = self.dg_config.warmup_initial_pct
+        elapsed = time.time() - bind_time
+
+        if elapsed >= T_secs:
+            yield event.plain_result(
+                f"🔥 预热完成！当前强度上限：{int(MAX_STRENGTH_PCT)}%（已完全解锁）"
+            )
+            return
+
+        current_cap = self._get_warmup_cap(user_id)
+        remaining_secs = max(0, int(T_secs - elapsed))
+        remaining_min = remaining_secs // 60
+        remaining_sec = remaining_secs % 60
+
+        # 进度条（10格）
+        progress = elapsed / T_secs
+        filled = int(progress * 10)
+        bar = "█" * filled + "░" * (10 - filled)
+
+        yield event.plain_result(
+            f"🔥 预热保护进行中\n"
+            f"[{bar}] {int(progress * 100)}%\n"
+            f"当前强度上限：{int(current_cap)}%\n"
+            f"距离完全解锁（{int(MAX_STRENGTH_PCT)}%）还需：{remaining_min} 分 {remaining_sec} 秒"
+        )
 
     # ==================== 郊狼决斗 ====================
 
@@ -1323,16 +1675,28 @@ class DGLabPlayPlugin(Star):
             if sender_client and not sender_client.is_destroyed:
                 self._enqueue_punishment(
                     sender_id,
-                    self._dice_punishment_task(sender_client, sender_id, event.unified_msg_origin, (pct, pct), duration),
+                    self._dice_punishment_task(
+                        sender_client,
+                        sender_id,
+                        event.unified_msg_origin,
+                        (pct, pct),
+                        duration,
+                    ),
                     f"⚔️ 决斗平局惩罚 {pct}% {duration}秒",
-                    event.unified_msg_origin
+                    event.unified_msg_origin,
                 )
             if not target_client.is_destroyed:
                 self._enqueue_punishment(
                     target,
-                    self._dice_punishment_task(target_client, target, event.unified_msg_origin, (pct, pct), duration),
+                    self._dice_punishment_task(
+                        target_client,
+                        target,
+                        event.unified_msg_origin,
+                        (pct, pct),
+                        duration,
+                    ),
                     f"⚔️ 决斗平局惩罚 {pct}% {duration}秒",
-                    event.unified_msg_origin
+                    event.unified_msg_origin,
                 )
         else:
             pct = min(diff * 20, 100)
@@ -1351,9 +1715,15 @@ class DGLabPlayPlugin(Star):
             if loser_client and not loser_client.is_destroyed:
                 self._enqueue_punishment(
                     loser_id,
-                    self._dice_punishment_task(loser_client, loser_id, event.unified_msg_origin, (pct, pct), duration),
+                    self._dice_punishment_task(
+                        loser_client,
+                        loser_id,
+                        event.unified_msg_origin,
+                        (pct, pct),
+                        duration,
+                    ),
                     f"⚔️ 决斗失败惩罚 {pct}% {duration}秒",
-                    event.unified_msg_origin
+                    event.unified_msg_origin,
                 )
             elif not loser_client:
                 yield event.plain_result("败方未绑定设备，惩罚无法执行")
@@ -1384,19 +1754,21 @@ class DGLabPlayPlugin(Star):
             "remaining": 5,
             "low": 1,
             "high": 100,
-            "umo": event.unified_msg_origin
+            "umo": event.unified_msg_origin,
         }
 
-        yield event.chain_result([
-            At(qq=target),
-            Plain(
-                f" 🔢 猜数字游戏开始！\n"
-                f"系统已生成 1-100 的随机数，你有 5 次机会\n"
-                f"每次猜错只提示大了还是小了，并受到惩罚\n"
-                f"偏差 ±5 以内算猜对，猜对则发起者受罚！\n"
-                f"请发送 /猜 <数字> 进行猜测"
-            )
-        ])
+        yield event.chain_result(
+            [
+                At(qq=target),
+                Plain(
+                    f" 🔢 猜数字游戏开始！\n"
+                    f"系统已生成 1-100 的随机数，你有 5 次机会\n"
+                    f"每次猜错只提示大了还是小了，并受到惩罚\n"
+                    f"偏差 ±5 以内算猜对，猜对则发起者受罚！\n"
+                    f"请发送 /猜 <数字> 进行猜测"
+                ),
+            ]
+        )
 
     @filter.command("猜")
     async def guess_answer(self, event: AstrMessageEvent):
@@ -1434,9 +1806,11 @@ class DGLabPlayPlugin(Star):
             if attacker_client and not attacker_client.is_destroyed:
                 self._enqueue_punishment(
                     attacker_id,
-                    self._dice_punishment_task(attacker_client, attacker_id, game["umo"], (50, 80), 20),
+                    self._dice_punishment_task(
+                        attacker_client, attacker_id, game["umo"], (50, 80), 20
+                    ),
                     "🔢 猜数字-发起者受罚 50-80% 20秒",
-                    game["umo"]
+                    game["umo"],
                 )
             return
 
@@ -1464,9 +1838,15 @@ class DGLabPlayPlugin(Star):
         if target_client and not target_client.is_destroyed:
             self._enqueue_punishment(
                 user_id,
-                self._dice_punishment_task(target_client, user_id, game.get("umo", event.unified_msg_origin), (pct, pct), duration),
+                self._dice_punishment_task(
+                    target_client,
+                    user_id,
+                    game.get("umo", event.unified_msg_origin),
+                    (pct, pct),
+                    duration,
+                ),
                 f"🔢 猜数字惩罚 {pct}% {duration}秒",
-                game.get("umo", event.unified_msg_origin)
+                game.get("umo", event.unified_msg_origin),
             )
 
     # ==================== 接力惩罚 ====================
@@ -1495,10 +1875,12 @@ class DGLabPlayPlugin(Star):
 
         self._start_gameplay_task(
             "relay_" + str(id(players)),
-            self._relay_task(players, base_pct, increment, umo)
+            self._relay_task(players, base_pct, increment, umo),
         )
 
-    async def _relay_task(self, players: list, base_pct: float, increment: float, umo: str):
+    async def _relay_task(
+        self, players: list, base_pct: float, increment: float, umo: str
+    ):
         """接力惩罚后台任务（不改变波形，只控制强度），所有输出在结束时合并为一条消息"""
         step_logs = []
         try:
@@ -1519,8 +1901,7 @@ class DGLabPlayPlugin(Star):
                 await asyncio.sleep(2)
 
             summary = "🔗 接力惩罚全部结束！\n" + "\n".join(step_logs)
-            chain = MessageChain()
-            chain.message(summary)
+            chain = MessageChain([Plain(summary)])
             await self.context.send_message(umo, chain)
         except asyncio.CancelledError:
             for _, play_client in players:
@@ -1542,26 +1923,34 @@ class DGLabPlayPlugin(Star):
             return
         try:
             from astrbot.api.platform import AiocqhttpAdapter
+
             platform = next(
-                (p for p in self.context.platform_manager.platform_insts
-                 if isinstance(p, AiocqhttpAdapter)),
+                (
+                    p
+                    for p in self.context.platform_manager.platform_insts
+                    if isinstance(p, AiocqhttpAdapter)
+                ),
                 None,
             )
             if platform is not None:
                 client = platform.get_client()
                 if client:
-                    @client.on('request')
+
+                    @client.on("request")
                     async def _handle_request(payload):
-                        if payload.get('request_type') == 'friend':
+                        if payload.get("request_type") == "friend":
                             try:
                                 await client.api.call_action(
-                                    'set_friend_add_request',
-                                    flag=payload.get('flag', ''),
-                                    approve=True
+                                    "set_friend_add_request",
+                                    flag=payload.get("flag", ""),
+                                    approve=True,
                                 )
-                                logger.info(f"已自动通过好友请求: user_id={payload.get('user_id')}")
+                                logger.info(
+                                    f"已自动通过好友请求: user_id={payload.get('user_id')}"
+                                )
                             except Exception as e:
                                 logger.error(f"自动通过好友请求失败: {e}")
+
                     logger.info("自动通过好友功能已启用")
                 else:
                     logger.warning("自动通过好友功能：无法获取 aiocqhttp 客户端")

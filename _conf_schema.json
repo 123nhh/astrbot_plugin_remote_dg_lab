@@ -73,5 +73,15 @@
         "description": "是否自动通过好友请求（仅 aiocqhttp 平台）",
         "type": "bool",
         "default": true
+    },
+    "warmup_duration_minutes": {
+        "description": "预热保护总时长（分钟）：绑定后强度上限从初始值缓慢升至 90%，达到该时长后完全解锁",
+        "type": "float",
+        "default": 10.0
+    },
+    "warmup_initial_pct": {
+        "description": "预热保护初始强度上限（%）：刚绑定时的最大强度限制",
+        "type": "float",
+        "default": 10.0
     }
 }

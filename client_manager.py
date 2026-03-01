@@ -12,9 +12,16 @@ from typing import Dict, Optional, Union, Callable, Any, List, Tuple
 from pathlib import Path
 
 from pydglab_ws import (
-    DGLabClient, DGLabWSServer, StrengthData, FeedbackButton,
-    DGLabWSConnect, RetCode, DGLabWSClient, PulseOperation,
-    Channel, PulseDataTooLong
+    DGLabClient,
+    DGLabWSServer,
+    StrengthData,
+    FeedbackButton,
+    DGLabWSConnect,
+    RetCode,
+    DGLabWSClient,
+    PulseOperation,
+    Channel,
+    PulseDataTooLong,
 )
 
 __all__ = ["DGLabPlayClient", "ClientManager"]
@@ -32,14 +39,24 @@ class DGLabPlayConfig:
         self.remote_server_uri: Optional[str] = config.get("remote_server_uri", None)
         self.local_server_host: str = config.get("local_server_host", "0.0.0.0")
         self.local_server_port: int = config.get("local_server_port", 4567)
-        self.local_server_publish_uri: str = config.get("local_server_publish_uri", "ws://127.0.0.1:4567")
-        self.local_server_heartbeat_interval: Optional[float] = config.get("local_server_heartbeat_interval", None)
+        self.local_server_publish_uri: str = config.get(
+            "local_server_publish_uri", "ws://127.0.0.1:4567"
+        )
+        self.local_server_heartbeat_interval: Optional[float] = config.get(
+            "local_server_heartbeat_interval", None
+        )
 
         # SSL 设置
         self.local_server_secure: bool = config.get("local_server_secure", False)
-        self.local_server_ssl_cert: Optional[str] = config.get("local_server_ssl_cert", None)
-        self.local_server_ssl_key: Optional[str] = config.get("local_server_ssl_key", None)
-        self.local_server_ssl_password: Optional[str] = config.get("local_server_ssl_password", None)
+        self.local_server_ssl_cert: Optional[str] = config.get(
+            "local_server_ssl_cert", None
+        )
+        self.local_server_ssl_key: Optional[str] = config.get(
+            "local_server_ssl_key", None
+        )
+        self.local_server_ssl_password: Optional[str] = config.get(
+            "local_server_ssl_password", None
+        )
 
         # 终端设置
         self.bind_timeout: float = config.get("bind_timeout", 90)
@@ -50,6 +67,14 @@ class DGLabPlayConfig:
         self.post_interval: float = config.get("post_interval", 1.0)
         self.sleep_after_clear: float = config.get("sleep_after_clear", 0.5)
 
+        # 预热保护设置
+        self.warmup_duration_minutes: float = max(
+            1.0, float(config.get("warmup_duration_minutes", 10.0))
+        )
+        self.warmup_initial_pct: float = max(
+            1.0, min(float(config.get("warmup_initial_pct", 10.0)), 90.0)
+        )
+
     @cached_property
     def server_ssl_context(self) -> Optional[ssl.SSLContext]:
         if self.local_server_secure and self.local_server_ssl_cert:
@@ -58,7 +83,7 @@ class DGLabPlayConfig:
                 context.load_cert_chain(
                     certfile=self.local_server_ssl_cert,
                     keyfile=self.local_server_ssl_key,
-                    password=self.local_server_ssl_password
+                    password=self.local_server_ssl_password,
                 )
                 return context
             except ssl.SSLError:
@@ -90,7 +115,7 @@ class DGLabPlayClient:
         config: DGLabPlayConfig,
         destroy_callback: Callable,
         logger,
-        client: DGLabClient = None
+        client: DGLabClient = None,
     ):
         self.user_id = user_id
         self.config = config
@@ -141,7 +166,11 @@ class DGLabPlayClient:
                 lock.release()
         if self.fetch_task:
             self.fetch_task.cancel()
-        if self.pulse_task and not self.pulse_task.cancelled() and not self.pulse_task.done():
+        if (
+            self.pulse_task
+            and not self.pulse_task.cancelled()
+            and not self.pulse_task.done()
+        ):
             self.pulse_task.cancel()
         self._logger.info(f"已结束并摧毁 {self.user_id} 的终端")
 
@@ -150,7 +179,7 @@ class DGLabPlayClient:
         try:
             await asyncio.wait_for(
                 self.client.bind() if not rebind else self.client.rebind(),
-                timeout=self.config.bind_timeout
+                timeout=self.config.bind_timeout,
             )
             return True
         except asyncio.TimeoutError:
@@ -160,18 +189,27 @@ class DGLabPlayClient:
             if self.bind_finished_lock.locked():
                 self.bind_finished_lock.release()
 
-    def setup_pulse_job(self, pulse_names: List[str], pulse_data: List[PulseOperation], *channels: Channel):
+    def setup_pulse_job(
+        self,
+        pulse_names: List[str],
+        pulse_data: List[PulseOperation],
+        *channels: Channel,
+    ):
         """设置波形发送任务"""
         names, data = self._pulse_name_data
         for current, new in zip((names, data), (pulse_names, pulse_data)):
             current.clear()
             current.extend(new)
-        if self.pulse_task and not self.pulse_task.cancelled() and not self.pulse_task.done():
+        if (
+            self.pulse_task
+            and not self.pulse_task.cancelled()
+            and not self.pulse_task.done()
+        ):
             self.pulse_task.cancel()
-        self.pulse_task = asyncio.create_task(
-            self._pulse_job(pulse_data, *channels)
+        self.pulse_task = asyncio.create_task(self._pulse_job(pulse_data, *channels))
+        self._logger.info(
+            f"已为用户 {self.user_id} 设置波形任务，波形长度 {len(pulse_data)}"
         )
-        self._logger.info(f"已为用户 {self.user_id} 设置波形任务，波形长度 {len(pulse_data)}")
 
     async def _handle_data(self, data: Union[StrengthData, FeedbackButton, RetCode]):
         """处理消息"""
@@ -193,20 +231,25 @@ class DGLabPlayClient:
             if self.config.remote_server:
                 try:
                     async with DGLabWSConnect(
-                        self.config.remote_server_uri,
-                        self.config.register_timeout
+                        self.config.remote_server_uri, self.config.register_timeout
                     ) as client:
                         self.client = client
                         self.register_finished_lock.release()
                         self._logger.info(f"终端 {client.client_id} 成功注册")
                         if not await self.wait_for_bind():
-                            self._logger.warning(f"终端 {client.client_id} 等待绑定超时")
+                            self._logger.warning(
+                                f"终端 {client.client_id} 等待绑定超时"
+                            )
                             return
-                        self._logger.info(f"终端 {client.client_id} 成功与 App {client.target_id} 绑定")
+                        self._logger.info(
+                            f"终端 {client.client_id} 成功与 App {client.target_id} 绑定"
+                        )
                         async for data in client.data_generator():
                             await self._handle_data(data)
                 except asyncio.TimeoutError:
-                    self._logger.error(f"终端从 {self.config.remote_server_uri} 获取 clientId 超时")
+                    self._logger.error(
+                        f"终端从 {self.config.remote_server_uri} 获取 clientId 超时"
+                    )
                     await self.destroy()
                     return
             else:
@@ -214,7 +257,9 @@ class DGLabPlayClient:
                 if not await self.wait_for_bind():
                     self._logger.warning(f"终端 {self.client.client_id} 等待绑定超时")
                     return
-                self._logger.info(f"终端 {self.client.client_id} 成功与 App {self.client.target_id} 绑定")
+                self._logger.info(
+                    f"终端 {self.client.client_id} 成功与 App {self.client.target_id} 绑定"
+                )
                 async for data in self.client.data_generator():
                     await self._handle_data(data)
         except Exception:
@@ -239,13 +284,17 @@ class DGLabPlayClient:
                     await asyncio.sleep(self.config.post_interval)
 
                 # 减去上面多余的睡眠时间
-                await asyncio.sleep(abs(pulse_data_duration - self.config.post_interval))
+                await asyncio.sleep(
+                    abs(pulse_data_duration - self.config.post_interval)
+                )
                 while True:
                     for channel in channels:
                         await self.client.add_pulses(channel, *pulse_data_for_post)
                     await asyncio.sleep(pulse_data_duration)
             except PulseDataTooLong:
-                self._logger.error(f"发送的波形数据过长 {self.config.duration_per_post}s，发送失败")
+                self._logger.error(
+                    f"发送的波形数据过长 {self.config.duration_per_post}s，发送失败"
+                )
         except Exception:
             self._logger.error("波形发送任务出现异常，已退出")
 
@@ -267,17 +316,21 @@ class ClientManager:
                     self.config.local_server_host,
                     self.config.local_server_port,
                     self.config.local_server_heartbeat_interval,
-                    ssl=self.config.server_ssl_context
+                    ssl=self.config.server_ssl_context,
                 ) as server:
                     self.ws_server = server
                     self._logger.info(
                         f"已在 {self.config.local_server_host}:{self.config.local_server_port}"
                         f" 上启动 DG-Lab WebSocket 服务端"
                     )
-                    self._logger.info(f"DG-Lab App 将通过 {self.config.local_server_publish_uri} 连接服务端")
+                    self._logger.info(
+                        f"DG-Lab App 将通过 {self.config.local_server_publish_uri} 连接服务端"
+                    )
                     await asyncio.Future()  # 永远挂起
             else:
-                self._logger.info(f"DG-Lab App 将通过 {self.config.remote_server_uri} 连接服务端")
+                self._logger.info(
+                    f"DG-Lab App 将通过 {self.config.remote_server_uri} 连接服务端"
+                )
         except Exception as e:
             self._logger.error(f"运行 DG-Lab WebSocket 服务端时出现异常: {e}")
 
@@ -292,7 +345,7 @@ class ClientManager:
                     self.config,
                     lambda x: self.user_id_to_client.pop(x.user_id, None),
                     self._logger,
-                    self.ws_server.new_local_client()
+                    self.ws_server.new_local_client(),
                 ) as play_client:
                     pass
                 self.user_id_to_client[user_id] = play_client
@@ -305,7 +358,7 @@ class ClientManager:
                 user_id,
                 self.config,
                 lambda x: self.user_id_to_client.pop(x.user_id, None),
-                self._logger
+                self._logger,
             ) as play_client:
                 pass
             async with play_client.register_finished_lock:
